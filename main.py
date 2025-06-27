@@ -311,163 +311,7 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
     logger.info('Training time {}'.format(total_time_str))
 
 def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
-    model.train()
-    optimizer.zero_grad()
-
-    num_steps = len(data_loader)
-    batch_time = AverageMeter()
-    loss_meter = AverageMeter()
-    norm_meter = AverageMeter()
-    scaler_meter = AverageMeter()
-
-    performance_meter = PerformanceMeter(config, config.DATA.DBNAME)
-
-    start = time.perf_counter()
-    end = time.perf_counter()
-    loss_dict = None
-
-    maml_inner_steps = getattr(config.MODEL.MTLORA, 'MAML_INNER_STEPS', 1)
-    maml_inner_lr = getattr(config.MODEL.MTLORA, 'MAML_INNER_LR', 1e-3)
-
-    for idx, batch in enumerate(data_loader):
-        if not config.MTL:
-            samples, targets = batch
-            samples = samples.cuda(non_blocking=True)
-            targets = targets.cuda(non_blocking=True)
-            N = samples.size(0)
-            half = N // 2
-            support_samples, query_samples = samples[:half], samples[half:]
-            support_targets, query_targets = targets[:half], targets[half:]
-        else:
-            samples = batch['image'].cuda(non_blocking=True)
-            N = samples.size(0)
-            half = N // 2
-            support_samples, query_samples = samples[:half], samples[half:]
-            support_targets = {t: batch[t][:half].cuda(non_blocking=True) for t in config.TASKS}
-            query_targets = {t: batch[t][half:].cuda(non_blocking=True) for t in config.TASKS}
-
-        if mixup_fn is not None:
-            support_samples, support_targets = mixup_fn(support_samples, support_targets)
-
-        # --- 获取 TA-LoRA 参数 ---
-        ta_lora_params = [p for n, p in model.named_parameters() if "lora_shared" in n]
-        fast_weights = [p.clone().detach().requires_grad_(True) for p in ta_lora_params]
-
-        # === Inner-loop: 在 support set 上做 MAML 更新 ===
-        for inner_step in range(maml_inner_steps):
-            set_ta_lora_weights(model, fast_weights)
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                support_outputs = model(support_samples)
-                support_loss, _ = criterion(support_outputs, support_targets)
-            grads = torch.autograd.grad(support_loss, fast_weights, create_graph=True)
-            fast_weights = [w - maml_inner_lr * g for w, g in zip(fast_weights, grads)]
-
-        # === Query set: mixup + forward ===
-        if mixup_fn is not None:
-            query_samples, query_targets = mixup_fn(query_samples, query_targets)
-        set_ta_lora_weights(model, fast_weights)
-        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-            query_outputs = model(query_samples)
-            loss, loss_dict = criterion(query_outputs, query_targets)
-
-        # === 外层反传+优化器更新 ===
-        is_second_order = True
-        grad_norm = loss_scaler(
-            loss, optimizer,
-            clip_grad=config.TRAIN.CLIP_GRAD,
-            parameters=model.parameters(),
-            create_graph=is_second_order,
-            update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0
-        )
-        if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
-            optimizer.zero_grad()
-            lr_scheduler.step_update(
-                (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
-        loss_scale_value = loss_scaler.state_dict()["scale"]
-
-        # torch.cuda.synchronize()
-
-        if not config.MTL:
-            loss_meter.update(loss.item(), targets.size(0))
-        else:
-            loss_meter.update(loss.item())
-
-        if grad_norm is not None:  # loss_scaler return None if not update
-            norm_meter.update(grad_norm)
-        scaler_meter.update(loss_scale_value)
-        batch_time.update(time.perf_counter() - end)
-        end = time.perf_counter()
-
-        if wandb_available:
-            metrics = {
-                "train/epoch_ndx": epoch,
-                "train/batch_ndx": idx,
-                "train/train_loss": loss_meter.val,
-                "train/train_loss_avg": loss_meter.avg,
-                "train/learning_rate": optimizer.param_groups[0]["lr"],
-                "train/weight_decay": optimizer.param_groups[0]['weight_decay'],
-                "train/time": batch_time.val,
-                "train/time_avg": batch_time.avg,
-                "train/grad_norm": norm_meter.val,
-                "train/grad_norm_avg": norm_meter.avg,
-                "train/loss_scale": scaler_meter.val,
-                "train/loss_scale_avg": scaler_meter.avg,
-                "train/memory": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
-            }
-            if loss_dict is not None:
-                for task, task_loss in loss_dict.items():
-                    metrics[f"train/tasks/{task}/loss"] = task_loss.item()
-            wandb.log(metrics)
-
-        if idx % config.PRINT_FREQ == 0:
-            lr = optimizer.param_groups[0]['lr']
-            wd = optimizer.param_groups[0]['weight_decay']
-            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-            etas = batch_time.avg * (num_steps - idx)
-            logger.info(
-                f'Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
-                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
-                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
-                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
-                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
-                f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
-                f'mem {memory_used:.0f}MB')
-
-    if config.EVAL_TRAINING is not None and (epoch % config.EVAL_TRAINING == 0):
-        print("Training Eval:")
-        performance_meter.update(
-            {t: get_output(outputs[t], t) for t in config.TASKS}, targets)
-
-        scores = performance_meter.get_score(verbose=True)
-        if wandb_available:
-            scores_logs = {
-                "train/epoch": epoch,
-            }
-            if 'semseg' in scores:
-                scores_logs["train/tasks/semseg/mIoU"] = scores['semseg']['mIoU']
-            if 'normals' in loss_dict:
-                scores_logs["train/tasks/normals/mean"] = scores['normals']['mean']
-                scores_logs["train/tasks/normals/rmse"] = scores['normals']['rmse']
-                scores_logs["train/tasks/normals/mean_v2"] = scores['normals']['mean_v2']
-                scores_logs["train/tasks/normals/rmse_v2"] = scores['normals']['rmse_v2']
-            if 'human_parts' in loss_dict:
-                scores_logs["train/tasks/human_parts/mIoU"] = scores['human_parts']['mIoU']
-            if 'sal' in loss_dict:
-                scores_logs["train/tasks/sal/maxF"] = scores['sal']['maxF']
-                scores_logs["train/tasks/sal/Beta maxF"] = scores['sal']['Beta maxF']
-                scores_logs["train/tasks/sal/mIoU"] = scores['sal']['mIoU']
-            if 'edge' in loss_dict:
-                scores_logs["train/tasks/sal/loss"] = scores['edge']['loss']
-            if 'depth' in loss_dict:
-                scores_logs["train/tasks/depth/rmse"] = scores['depth']['rmse']
-                scores_logs["train/tasks/depth/log_rmse"] = scores['depth']['log_rmse']
-
-            wandb.log(scores_logs)
-
-    epoch_time = time.perf_counter() - start
-    logger.info(
-        f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
-
+    
 
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
     model.train()
@@ -738,11 +582,11 @@ if __name__ == '__main__':
 
     # linear scale the learning rate according to total batch size, may not be optimal
     linear_scaled_lr = config.TRAIN.BASE_LR * \
-        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+                       config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     linear_scaled_warmup_lr = config.TRAIN.WARMUP_LR * \
-        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+                              config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     linear_scaled_min_lr = config.TRAIN.MIN_LR * \
-        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+                           config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     # gradient accumulation also need to scale the learning rate
     if config.TRAIN.ACCUMULATION_STEPS > 1:
         linear_scaled_lr = linear_scaled_lr * config.TRAIN.ACCUMULATION_STEPS
