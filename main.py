@@ -32,7 +32,13 @@ from utils import load_checkpoint, load_pretrained, save_checkpoint, NativeScale
 from mtl_loss_schemes import MultiTaskLoss, get_loss
 from evaluation.evaluate_utils import PerformanceMeter, get_output
 from ptflops import get_model_complexity_info
-from models.lora import mark_only_lora_as_trainable
+# from models.lora import mark_only_lora_as_trainable
+from models.lora import (
+    mark_only_lora_as_trainable,
+    set_task_specific_trainable,
+    set_shared_lora_trainable,
+    iter_shared_lora_params,
+)
 
 try:
     import wandb
@@ -284,6 +290,7 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
         if not config.MTL:
             data_loader_train.sampler.set_epoch(epoch)
 
+        #⭐MAML逻辑
         if config.MODEL.MTLORA.MAML_MODE:
             maml_train_one_epoch(
                 config, model, criterion, data_loader_train, optimizer, epoch,
@@ -311,7 +318,111 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
     logger.info('Training time {}'.format(total_time_str))
 
 def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
-    
+    model.train()
+    optimizer.zero_grad()
+
+    tasks = config.TASKS
+    inner_steps = config.MODEL.MTLORA.MAML_INNER_STEPS
+    inner_lr = config.MODEL.MTLORA.MAML_INNER_LR
+
+    num_steps = len(data_loader)
+    batch_time = AverageMeter()
+    loss_meter = AverageMeter()
+    norm_meter = AverageMeter()
+    scaler_meter = AverageMeter()
+
+    start = time.perf_counter()
+    end = time.perf_counter()
+
+    for idx, batch in enumerate(data_loader):
+        samples = batch['image'].cuda(non_blocking=True)
+        targets = {task: batch[task].cuda(non_blocking=True) for task in tasks}
+
+        # ---- Update task-specific LoRA ----
+        for t in tasks:
+            set_task_specific_trainable(model, t)
+            optimizer.zero_grad()
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                outputs = model(samples)
+                loss_t = criterion.loss_ft[t](outputs[t], targets[t]) * criterion.loss_weights[t]
+            loss_scaler(loss_t, optimizer, clip_grad=config.TRAIN.CLIP_GRAD,
+                        parameters=[p for p in model.parameters() if p.requires_grad],
+                        create_graph=False, update_grad=True)
+            optimizer.zero_grad()
+
+        lr_scheduler.step_update(epoch * num_steps + idx)
+
+        # ---- Meta update for shared LoRA ----
+        set_shared_lora_trainable(model)
+        meta_loss = 0.0
+        batch_size = samples.shape[0]
+        mid = batch_size // 2
+        for t in tasks:
+            # Split batch into support/query
+            support_images = samples[:mid]
+            query_images = samples[mid:]
+            support_targets = targets[t][:mid]
+            query_targets = targets[t][mid:]
+
+            # Save current shared weights
+            fast_weights = [p.clone() for p in iter_shared_lora_params(model)]
+
+            # Inner loop (first-order)
+            for _ in range(inner_steps):
+                with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                    out_s = model(support_images)
+                    loss_s = criterion.loss_ft[t](out_s[t], support_targets) * criterion.loss_weights[t]
+                shared_params = list(iter_shared_lora_params(model))
+                grads = torch.autograd.grad(
+                    loss_s,
+                    shared_params,
+                    retain_graph=False,
+                    allow_unused=True,
+                )
+                for p, g in zip(shared_params, grads):
+                    if g is not None:
+                        p.data -= inner_lr * g
+
+            # Query loss
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                out_q = model(query_images)
+                loss_q = criterion.loss_ft[t](out_q[t], query_targets) * criterion.loss_weights[t]
+            meta_loss = meta_loss + loss_q
+
+            # Restore weights
+            for p, w in zip(iter_shared_lora_params(model), fast_weights):
+                p.data.copy_(w.data)
+
+        meta_loss = meta_loss / len(tasks)
+
+        grad_norm = loss_scaler(meta_loss, optimizer, clip_grad=config.TRAIN.CLIP_GRAD,
+                                parameters=[p for p in model.parameters() if p.requires_grad],
+                                create_graph=False, update_grad=True)
+        optimizer.zero_grad()
+        lr_scheduler.step_update(epoch * num_steps + idx)
+
+        loss_meter.update(meta_loss.item())
+        if grad_norm is not None:
+            norm_meter.update(grad_norm)
+        scaler_meter.update(loss_scaler.state_dict()["scale"])
+        batch_time.update(time.perf_counter() - end)
+        end = time.perf_counter()
+
+        if idx % config.PRINT_FREQ == 0:
+            lr = optimizer.param_groups[0]['lr']
+            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+            etas = batch_time.avg * (num_steps - idx)
+            logger.info(
+                f'MAML Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
+                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t'
+                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
+                f'meta_loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
+                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
+                f'mem {memory_used:.0f}MB')
+
+    epoch_time = time.perf_counter() - start
+    logger.info(
+        f"EPOCH {epoch} MAML training takes {datetime.timedelta(seconds=int(epoch_time))}")
 
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
     model.train()

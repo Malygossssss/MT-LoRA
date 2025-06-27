@@ -25,7 +25,7 @@ Running MTLoRA code, is very simmilar to Swin's codebase:
 
 3. **Run the code**
     ```python
-    CUDA_VISIBLE_DEVICES=5,7 python -m torch.distributed.launch --nproc_per_node 2 --master_port 29501 main.py --cfg configs/mtlora/tiny_448/mtlora_tiny_448_r64_scale4_pertask_maml.yaml --pascal PASCAL_MT --tasks semseg,normals,sal,human_parts --batch-size 32 --ckpt-freq=20 --epoch=300 --resume-backbone ./backbone/swin_tiny_patch4_window7_224.pth
+    CUDA_VISIBLE_DEVICES=7 python -m torch.distributed.launch --nproc_per_node 1 --master_port 29501 main.py --cfg configs/mtlora/tiny_448/mtlora_tiny_448_r64_scale4_pertask_maml.yaml --pascal PASCAL_MT --tasks semseg,normals,sal,human_parts --batch-size 32 --ckpt-freq=20 --epoch=300 --resume-backbone ./backbone/swin_tiny_patch4_window7_224.pth
     ```
     Swin variants and their weights can be found at the official [Swin Transformer repository](https://github.com/microsoft/Swin-Transformer). 
   

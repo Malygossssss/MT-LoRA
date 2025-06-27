@@ -621,6 +621,31 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", freeze_pat
     else:
         raise NotImplementedError
 
+def set_task_specific_trainable(model: nn.Module, task: str) -> None:
+    """Enable gradients for LoRA parameters of a single task only."""
+    for name, p in model.named_parameters():
+        if f"lora_tasks_A.{task}" in name or f"lora_tasks_B.{task}" in name:
+            p.requires_grad = True
+        elif "lora_tasks_A." in name or "lora_tasks_B." in name or "lora_shared_" in name:
+            p.requires_grad = False
+
+
+def set_shared_lora_trainable(model: nn.Module) -> None:
+    """Enable gradients for task-agnostic LoRA parameters only."""
+    for name, p in model.named_parameters():
+        if "lora_shared_" in name:
+            p.requires_grad = True
+        elif "lora_tasks_A." in name or "lora_tasks_B." in name:
+            p.requires_grad = False
+
+
+def iter_shared_lora_params(model: nn.Module):
+    """Yield task-agnostic LoRA parameters."""
+    for name, p in model.named_parameters():
+        if "lora_shared_" in name:
+            yield p
+
+
 
 def lora_filter(key: str, value: Any) -> bool:
     return "lora_" in key
