@@ -10,7 +10,7 @@ MODEL:
     NUM_HEADS: [3, 6, 12, 24]
     WINDOW_SIZE: 7
   MTLORA:
-    MAML_MODE: true   # 或 false
+    MAML_MODE: True   # 或 false
     ENABLED: True
     MAML_INNER_STEPS: 1    # 每个support set内更新步数
     MAML_INNER_LR: 0.001   # inner-loop学习率
