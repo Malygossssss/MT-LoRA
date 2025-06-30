@@ -410,11 +410,19 @@ def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch
                 inner_loss = criterion.loss_ft[task_name](inner_outputs[task_name], support_targets) * \
                     criterion.loss_weights[task_name]
 
-            grads = torch.autograd.grad(inner_loss, ta_params, create_graph=False)
-            # Apply one gradient descent step manually
+            grads = torch.autograd.grad(
+                inner_loss,
+                ta_params,
+                create_graph=False,
+                allow_unused=True,
+            )
+            # Apply one gradient descent step manually. Skip parameters that
+            # were unused in the computation graph as autograd returns ``None``
+            # for them when ``allow_unused`` is enabled.
             with torch.no_grad():
                 for p, g in zip(ta_params, grads):
-                    p.add_(g, alpha=-config.MODEL.MTLORA.MAML_INNER_LR)
+                    if g is not None:
+                        p.add_(g, alpha=-config.MODEL.MTLORA.MAML_INNER_LR)
 
             # ---------------------- Query loss -------------------------
             query_samples = samples[query_slice]
