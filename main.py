@@ -326,15 +326,11 @@ def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch
     This routine closely follows :func:`train_one_epoch` but performs two
     distinct steps for every batch:
 
-    1. **Task specific LoRA update** -- for each task we only update the
-       corresponding task specific LoRA matrices. This is equivalent to the
-       normal MT-LoRA training procedure.
-    2. **Meta update of task agnostic LoRA** -- after the task specific updates
-       we apply a MAML style update on the shared LoRA matrices.  For every
-       task the batch is split into a support and a query set.  The support set
-       is used for the inner loop update while the query set is used to
-       estimate the outer loss.  The outer losses of all tasks are averaged and
-       used to update the shared parameters.
+    1. **Task specific LoRA update** -- for each task we update only its
+       corresponding task specific LoRA matrices using the current batch.
+    2. **Task agnostic LoRA update** -- after all task specific updates we
+       freeze them and update the shared LoRA matrices using the mean loss of
+       all tasks on the same batch.
 
     The code intentionally mirrors :func:`train_one_epoch` so that logging and
     scheduling remain identical.
@@ -366,32 +362,36 @@ def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch
         # ================================================================
         # 1. Task specific LoRA update
         # ================================================================
-        for task_name in config.TASKS:
+        task_losses = []
+        for t_idx, task_name in enumerate(config.TASKS):
             # Freeze all parameters first
             for p in model.parameters():
                 p.requires_grad = False
             # Enable only the parameters of the current task specific LoRA
+            ts_params = []
             for name, p in model.named_parameters():
                 if 'lora_tasks_' in name and f'.{task_name}' in name:
                     p.requires_grad = True
+                    ts_params.append(p)
 
             # Forward and backward for the current task
             with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                outputs = model(samples)
-                task_loss = criterion.loss_ft[task_name](outputs[task_name], targets[task_name]) * \
+                out_dict = model.forward_task(samples, task_name)
+                task_loss = criterion.loss_ft[task_name](out_dict[task_name], targets[task_name]) * \
                             criterion.loss_weights[task_name]
+            task_losses.append(task_loss)
 
-            grad_norm = loss_scaler(task_loss, optimizer,
-                                    clip_grad=config.TRAIN.CLIP_GRAD,
-                                    parameters=[p for p in model.parameters() if p.requires_grad],
-                                    create_graph=False, update_grad=True)
+            loss_scaler(task_loss, optimizer,
+                        clip_grad=config.TRAIN.CLIP_GRAD,
+                        parameters=ts_params,
+                        create_graph=False, update_grad=True,
+                        retain_graph=True)
 
             optimizer.zero_grad()
 
         # ================================================================
-        # 2. MAML update of task agnostic LoRA
+        # 2. Task agnostic LoRA update using mean task loss
         # ================================================================
-        # Freeze everything and unfreeze only shared LoRA parameters
         for p in model.parameters():
             p.requires_grad = False
         ta_params = []
@@ -400,48 +400,7 @@ def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch
                 p.requires_grad = True
                 ta_params.append(p)
 
-        # Backup original shared parameters so that they can be restored after
-        # each task specific inner loop
-        ta_backup = [p.clone() for p in ta_params]
-
-        # Split batch indices for support/query sets
-        support_size = samples.shape[0] // 2
-        query_slice = slice(support_size, None)
-
-        meta_losses = []
-
-        for task_name in config.TASKS:
-            # ---------------------- Inner loop --------------------------
-            support_samples = samples[:support_size]
-            support_targets = targets[task_name][:support_size]
-
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                inner_outputs = model(support_samples)
-                inner_loss = criterion.loss_ft[task_name](inner_outputs[task_name], support_targets) * \
-                             criterion.loss_weights[task_name]
-
-            grads = torch.autograd.grad(inner_loss, ta_params, create_graph=False)
-            # Apply one gradient descent step manually
-            with torch.no_grad():
-                for p, g in zip(ta_params, grads):
-                    p.add_(g, alpha=-config.MODEL.MTLORA.MAML_INNER_LR)
-
-            # ---------------------- Query loss -------------------------
-            query_samples = samples[query_slice]
-            query_targets = targets[task_name][query_slice]
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                query_outputs = model(query_samples)
-                query_loss = criterion.loss_ft[task_name](query_outputs[task_name], query_targets) * \
-                             criterion.loss_weights[task_name]
-            meta_losses.append(query_loss)
-
-            # Restore original parameters before next task
-            with torch.no_grad():
-                for p, b in zip(ta_params, ta_backup):
-                    p.copy_(b)
-
-        # Average meta loss over all tasks
-        meta_loss = torch.stack(meta_losses).mean()
+        meta_loss = torch.stack(task_losses).mean()
 
         is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
         grad_norm = loss_scaler(meta_loss, optimizer,
@@ -498,6 +457,7 @@ def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch
     epoch_time = time.perf_counter() - start
     logger.info(
         f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
+
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
     model.train()
     optimizer.zero_grad()

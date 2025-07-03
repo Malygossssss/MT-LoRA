@@ -75,6 +75,12 @@ class DecoderGroup(nn.Module):
         }
         return result
 
+    def forward_task(self, x, task):
+        """Forward pass for a single task."""
+        return F.interpolate(
+            self.decoders[task](x[task]), self.out_size, mode="bilinear"
+        )
+
 
 class Downsampler(nn.Module):
     def __init__(self, dims, channels, input_res, bias=False, enabled=True):
@@ -229,6 +235,27 @@ class MultiTaskSwin(nn.Module):
 
         result = self.decoders(shared_ft)
         return result
+
+    def forward_task(self, x, task):
+        """Forward pass for a single task."""
+        shared_representation = self.backbone(x, return_stages=True)
+
+        if self.mtlora.ENABLED:
+            shared_ft = {task: []}
+
+            for _, tasks_shared_rep in shared_representation:
+                if task in tasks_shared_rep:
+                    shared_ft[task].append(tasks_shared_rep[task])
+            shared_ft[task] = self.downsampler[task](shared_ft[task])
+        else:
+            if self.per_task_downsampler:
+                shared_ft = {task: self.downsampler[task](shared_representation)}
+            else:
+                shared_representation = self.downsampler(shared_representation)
+                shared_ft = {task: shared_representation}
+
+        result = self.decoders.forward_task(shared_ft, task)
+        return {task: result}
 
     def freeze_all(self):
         for param in self.parameters():
