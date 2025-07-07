@@ -351,7 +351,7 @@ class NativeScalerWithGradNormCount:
             grads = [p for p in parameters if p.grad is not None]
             if not grads:
                 # nothing to update, only advance scaler state
-                self._scaler.update()
+                # self._scaler.update()
                 return None
 
             if clip_grad is not None:
