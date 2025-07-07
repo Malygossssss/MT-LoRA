@@ -345,25 +345,25 @@ class NativeScalerWithGradNormCount:
     def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True, retain_graph=False):
         self._scaler.scale(loss).backward(create_graph=create_graph, retain_graph=retain_graph)
         if update_grad:
-            # if parameters is None:
-            #     parameters = [p for g in optimizer.param_groups for p in g['params']]
-            #
-            # grads = [p for p in parameters if p.grad is not None]
-            # if not grads:
-            #     # nothing to update, only advance scaler state
-            #     self._scaler.update()
-            #     return None
+            if parameters is None:
+                parameters = [p for g in optimizer.param_groups for p in g['params']]
+
+            grads = [p for p in parameters if p.grad is not None]
+            if not grads:
+                # nothing to update, only advance scaler state
+                self._scaler.update()
+                return None
 
             if clip_grad is not None:
-                assert parameters is not None
+                # assert parameters is not None
                 # unscale the gradients of optimizer's assigned params in-place
                 self._scaler.unscale_(optimizer)
-                norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
-                # norm = torch.nn.utils.clip_grad_norm_(grads, clip_grad)
+                # norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
+                norm = torch.nn.utils.clip_grad_norm_(grads, clip_grad)
             else:
                 self._scaler.unscale_(optimizer)
-                norm = ampscaler_get_grad_norm(parameters)
-                # norm = ampscaler_get_grad_norm(grads)
+                # norm = ampscaler_get_grad_norm(parameters)
+                norm = ampscaler_get_grad_norm(grads)
             self._scaler.step(optimizer)
             self._scaler.update()
         else:
