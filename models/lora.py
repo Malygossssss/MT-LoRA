@@ -621,6 +621,51 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", freeze_pat
     else:
         raise NotImplementedError
 
+def consolidate_task_lora_to_shared(model: nn.Module) -> None:
+    """Convert all task specific LoRA weights to shared LoRA weights."""
+    for module in model.modules():
+        if hasattr(module, "lora_tasks_A") and hasattr(module, "lora_shared_A"):
+            with torch.no_grad():
+                r = module.lora_shared_A.size(0)
+                delta = module.lora_shared_B @ module.lora_shared_A
+                if isinstance(module.lora_shared_scale, torch.Tensor):
+                    delta = delta * module.lora_shared_scale.item()
+                else:
+                    delta = delta * module.lora_shared_scale
+                for task in list(module.lora_tasks_A.keys()):
+                    scale = module.lora_task_scale[task]
+                    if isinstance(scale, torch.Tensor):
+                        scale = scale.item()
+                    delta += (module.lora_tasks_B[task] @ module.lora_tasks_A[task]) * scale
+                u, s, vh = torch.linalg.svd(delta, full_matrices=False)
+                u = u[:, :r]
+                s = s[:r]
+                vh = vh[:r, :]
+                module.lora_shared_B.data.copy_(u @ torch.diag(torch.sqrt(s)))
+                module.lora_shared_A.data.copy_(torch.diag(torch.sqrt(s)) @ vh)
+            del module.lora_tasks_A
+            del module.lora_tasks_B
+            del module.lora_task_scale
+            module.tasks = None
+
+def print_lora_layer_summary(model: nn.Module) -> None:
+    """Log how many TA-LoRA and TS-LoRA layers are present in the model."""
+    ta_count = 0
+    ts_layers = []
+    for name, module in model.named_modules():
+        if hasattr(module, "lora_shared_A"):
+            ta_count += 1
+        if hasattr(module, "lora_tasks_A"):
+            ts_layers.append(name)
+
+    print(f"TA-LoRA layers: {ta_count}")
+    if ts_layers:
+        print("WARNING: The following TS-LoRA layers remain and were not consolidated:")
+        for layer in ts_layers:
+            print(f" - {layer}")
+    else:
+        print("No TS-LoRA layers remain. Model ready for TA-LoRA training.")
+
 def lora_filter(key: str, value: Any) -> bool:
     return "lora_" in key
 
