@@ -246,9 +246,6 @@ def main(config):
         if not config.SKIP_INITIAL_EVAL:
             acc1, _, _ = validate(config, data_loader_val, model, 0)
 
-    if config.MODEL.MTLORA.MAML_MODE:
-        consolidate_task_lora_to_shared(model)
-
     if config.THROUGHPUT_MODE:
         throughput(data_loader_val, model, logger)
         return
@@ -284,7 +281,7 @@ Extra params:                {(trainable_params - (lora_params + decoder_params)
 Total params:               {total_model_params:,} (trainable ratio: {trainable_params/total_model_params * 100:2.2f}%)
 Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio: {trainable_params/total_model_params_without_lora * 100:2.2f}%)
 """)
-    print_lora_layer_summary(model)
+    # print_lora_layer_summary(model)
     logger.info("Start training")
     # for name, param in model.named_parameters():
     #     if 'lora_shared_' in name:
@@ -323,15 +320,22 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
 
-def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
-    """Train one epoch using a first-order MAML algorithm on TA-LoRA parameters.
+def maml_train_one_epoch(
+        config,
+        model,
+        criterion,
+        data_loader,
+        optimizer,
+        epoch,
+        mixup_fn,
+        lr_scheduler,
+        loss_scaler,
+        task=None,
+        teacher=None):
+    """Train one epoch using a per-task MAML update.
 
-    Each input batch is divided into a support and a query set. The support set
-    is used to perform an inner-loop update of the task agnostic (TA) LoRA
-    parameters. The query set is then evaluated using the adapted parameters and
-    the resulting loss is employed for the outer-loop update of the original
-    TA-LoRA weights. This routine mirrors :func:`train_one_epoch` so that the
-    logging and scheduling behaviour stays consistent.
+    After computing the meta loss over all tasks, gradients are applied to
+    **all** LoRA weights (both shared and task specific).
     """
 
     model.train()
@@ -347,75 +351,88 @@ def maml_train_one_epoch(config, model, criterion, data_loader, optimizer, epoch
     end = time.perf_counter()
     loss_dict = None
 
-    # MAML only uses task agnostic LoRA parameters
     for idx, batch in enumerate(data_loader):
-        # ------------------------------------------------------------------
-        # Prepare input tensors
-        # ------------------------------------------------------------------
         samples = batch['image'].cuda(non_blocking=True)
-        targets = {task: batch[task].cuda(non_blocking=True) for task in config.TASKS}
+        targets = {
+            t: batch[t].cuda(non_blocking=True) for t in config.TASKS
+        }
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        # ================================================================
-        # 1. MAML inner loop on support set
-        # ================================================================
         batch_size = samples.size(0)
         support_size = batch_size // 2
         support_samples = samples[:support_size]
         query_samples = samples[support_size:]
-        support_targets = {t: targets[t][:support_size] for t in config.TASKS}
-        query_targets = {t: targets[t][support_size:] for t in config.TASKS}
 
         for p in model.parameters():
             p.requires_grad = False
-        ta_params = []
-        for name, p in model.named_parameters():
-            if 'lora_shared_' in name:
-                p.requires_grad = True
-                ta_params.append(p)
 
-        param_backup = [p.detach().clone() for p in ta_params]
+        lora_params = [
+            p for n, p in model.named_parameters()
+            if 'lora_shared_' in n or 'lora_tasks_' in n
+        ]
+        for p in lora_params:
+            p.requires_grad = True
 
-        # inner update using support set
-        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-            inner_out = model(support_samples)
-            inner_loss, _ = criterion(inner_out, support_targets)
+        query_losses = []
+        loss_dict = {}
 
-        inner_grads = torch.autograd.grad(inner_loss, ta_params, create_graph=False)
-        inner_lr = config.MODEL.MTLORA.MAML_INNER_LR
-        for p, g in zip(ta_params, inner_grads):
-            p.data = p.data - inner_lr * g
+        for task_name in config.TASKS:
+            task_params = [
+                p for n, p in model.named_parameters()
+                if 'lora_shared_' in n or ('lora_tasks_' in n and f'.{task_name}' in n)
+            ]
+            backup = [p.detach().clone() for p in task_params]
 
-        # ================================================================
-        # 2. MAML outer loop on query set
-        # ================================================================
-        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-            query_out = model(query_samples)
-            meta_loss, loss_dict = criterion(query_out, query_targets)
+            starget = targets[task_name][:support_size]
+            qtarget = targets[task_name][support_size:]
 
-        loss_scaler._scaler.scale(meta_loss).backward()
+            inner_steps = max(1, config.MODEL.MTLORA.MAML_INNER_STEPS)
+            for _ in range(inner_steps):
+                with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                    sout = model.forward_task(support_samples, task_name)[task_name]
+                    s_loss = criterion.loss_ft[task_name](sout, starget)
+                    s_loss = criterion.loss_weights[task_name] * s_loss
 
-        for p, b in zip(ta_params, param_backup):
-            p.data.copy_(b)
+                grads = torch.autograd.grad(
+                    s_loss,
+                    task_params,
+                    allow_unused=True,
+                    create_graph=False,
+                )
+                # replace missing grads with zeros to avoid runtime errors
+                grads = [torch.zeros_like(p) if g is None else g
+                         for p, g in zip(task_params, grads)]
+                inner_lr = config.MODEL.MTLORA.MAML_INNER_LR
+                for p, g in zip(task_params, grads):
+                    p.data = p.data - inner_lr * g
 
-        grads = [p for p in ta_params if p.grad is not None]
-        if grads:
-            loss_scaler._scaler.unscale_(optimizer)
-            if config.TRAIN.CLIP_GRAD is not None:
-                grad_norm = torch.nn.utils.clip_grad_norm_(grads, config.TRAIN.CLIP_GRAD)
-            else:
-                from utils import ampscaler_get_grad_norm
-                grad_norm = ampscaler_get_grad_norm(grads)
-            loss_scaler._scaler.step(optimizer)
-            loss_scaler._scaler.update()
-        else:
-            grad_norm = None
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                qout = model.forward_task(query_samples, task_name)[task_name]
+                q_loss = criterion.loss_ft[task_name](qout, qtarget)
+                q_loss = criterion.loss_weights[task_name] * q_loss
+
+            query_losses.append(q_loss)
+            loss_dict[task_name] = q_loss.detach()
+
+            for p, b in zip(task_params, backup):
+                p.data.copy_(b)
+
+        meta_loss = torch.stack(query_losses).mean()
+
+        grad_norm = loss_scaler(
+            meta_loss,
+            optimizer,
+            clip_grad=config.TRAIN.CLIP_GRAD,
+            parameters=lora_params,
+            update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0,
+        )
 
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
             optimizer.zero_grad()
-            lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
+            lr_scheduler.step_update(
+                (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
 
         loss_scale_value = loss_scaler.state_dict()["scale"]
 
