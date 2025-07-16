@@ -621,6 +621,12 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", freeze_pat
     else:
         raise NotImplementedError
 
+def freeze_task_specific_lora(model: nn.Module) -> None:
+    """Freeze all task specific LoRA parameters."""
+    for name, param in model.named_parameters():
+        if 'lora_tasks_' in name or 'lora_task_scale' in name:
+            param.requires_grad = False
+
 def consolidate_task_lora_to_shared(model: nn.Module) -> None:
     """Convert all task specific LoRA weights to shared LoRA weights."""
     for module in model.modules():
