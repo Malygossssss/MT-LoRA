@@ -541,7 +541,7 @@ def reptile_train_one_epoch(
             p.requires_grad = True
 
         init_state = [p.detach().clone() for p in lora_params]
-        diff_accum = [torch.zeros_like(p) for p in lora_params]
+        diff_list = []
 
         task_losses = []
         loss_dict = {}
@@ -585,12 +585,19 @@ def reptile_train_one_epoch(
             task_losses.append(t_loss)
             loss_dict[task_name] = t_loss.detach()
 
-            for d, p, init in zip(diff_accum, lora_params, init_state):
-                d += p.data - init
+            current_diff = [p.data - init for p, init in zip(lora_params, init_state)]
+            diff_list.append(current_diff)
+
+            for p, init in zip(lora_params, init_state):
+                p.data.copy_(init)
 
         meta_lr = optimizer.param_groups[0]['lr']
-        for p, init, d in zip(lora_params, init_state, diff_accum):
-            p.data = init + meta_lr * d / len(config.TASKS)
+        final_diff = [
+            torch.stack([d[i] for d in diff_list]).mean(0)
+            for i in range(len(lora_params))
+        ]
+        for p, init, d in zip(lora_params, init_state, final_diff):
+            p.data = init + meta_lr * d
 
         lr_scheduler.step_update(epoch * num_steps + idx)
 
