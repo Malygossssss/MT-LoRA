@@ -13,7 +13,7 @@ MODEL:
     MAML_MODE: True   # 或 false
     ENABLED: True
     MAML_INNER_STEPS: 1    # 每个support set内更新步数
-    MAML_INNER_LR: 0.0005   # inner-loop学习率
+    MAML_INNER_LR: 0.001   # inner-loop学习率
     R: [64, 64, 64, 64]
     SHARED_SCALE: [4.0]
     TASK_SCALE: [4.0]

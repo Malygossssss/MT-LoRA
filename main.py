@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
+from torch.nn import Module
+from torch.nn.utils.stateless import functional_call
+from collections import OrderedDict
 
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import accuracy, AverageMeter
@@ -153,6 +156,10 @@ def main(config):
     model = build_model(config)
     if config.MTL:
         model = build_mtl_model(model, config)
+
+    if getattr(config.MODEL.MTLORA, 'METASGD_MODE', False):
+        init_meta_sgd_lrs(model, config.MODEL.MTLORA.METASGD_INIT,
+                          freeze_ts=config.MODEL.MTLORA.FREEZE_TS_LORA)
 
     n_parameters = sum(p.numel() for p in model.parameters())
     logger.info(f"number of params: {n_parameters / 1e6} M")
@@ -303,6 +310,12 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
                 config, model, criterion, data_loader_train, optimizer, epoch,
                 mixup_fn, lr_scheduler, loss_scaler, teacher=teacher
             )
+        elif getattr(config.MODEL.MTLORA, 'METASGD_MODE', False):
+            print("--------------------Meta-SGD---------------------")
+            meta_sgd_train_one_epoch(
+                config, model, criterion, data_loader_train, optimizer, epoch,
+                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher
+            )
         elif config.MODEL.MTLORA.MAML_MODE:
             print("--------------------MAML---------------------")
             maml_train_one_epoch(
@@ -330,6 +343,31 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
     total_time = time.perf_counter() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
+
+class _TaskWrapper(Module):
+    """Simple wrapper to expose ``forward_task`` as ``forward`` for functional_call."""
+
+    def __init__(self, model: Module, task: str):
+        super().__init__()
+        self.model = model
+        self.task = task
+
+    def forward(self, x):
+        return self.model.forward_task(x, self.task)[self.task]
+
+
+def init_meta_sgd_lrs(model: Module, init_lr: float, freeze_ts: bool = False) -> None:
+    """Attach per-parameter learnable inner-loop lrs to ``model`` for Meta-SGD."""
+
+    lora_named_params = [
+        (n, p)
+        for n, p in model.named_parameters()
+        if 'lora_shared_' in n or (not freeze_ts and 'lora_tasks_' in n)
+    ]
+    model.meta_sgd_lrs = torch.nn.ParameterList(
+        [torch.nn.Parameter(torch.full_like(p, init_lr)) for _, p in lora_named_params]
+    )
+    model.meta_sgd_lr_map = {n: i for i, (n, _) in enumerate(lora_named_params)}
 
 def maml_train_one_epoch(
         config,
@@ -494,6 +532,167 @@ def maml_train_one_epoch(
     logger.info(
         f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
 
+def meta_sgd_train_one_epoch(
+        config,
+        model,
+        criterion,
+        data_loader,
+        optimizer,
+        epoch,
+        mixup_fn,
+        lr_scheduler,
+        loss_scaler,
+        task=None,
+        teacher=None):
+    """Train one epoch using Meta-SGD with learnable per-parameter inner learning rates."""
+
+    model.train()
+    optimizer.zero_grad()
+
+    num_steps = len(data_loader)
+    batch_time = AverageMeter()
+    loss_meter = AverageMeter()
+    norm_meter = AverageMeter()
+    scaler_meter = AverageMeter()
+
+    lora_named = [
+        (n, p)
+        for n, p in model.named_parameters()
+        if 'lora_shared_' in n or (
+                not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n)
+    ]
+    lora_names = [n for n, _ in lora_named]
+    lora_params = [p for _, p in lora_named]
+
+    assert hasattr(model, 'meta_sgd_lrs'), 'call init_meta_sgd_lrs before training'
+    meta_lrs = model.meta_sgd_lrs
+    lr_map = model.meta_sgd_lr_map
+
+    start = time.perf_counter()
+    end = time.perf_counter()
+    loss_dict = None
+
+    for idx, batch in enumerate(data_loader):
+        samples = batch['image'].cuda(non_blocking=True)
+        targets = {t: batch[t].cuda(non_blocking=True) for t in config.TASKS}
+
+        if mixup_fn is not None:
+            samples, targets = mixup_fn(samples, targets)
+
+        batch_size = samples.size(0)
+        support_size = batch_size // 2
+        support_samples = samples[:support_size]
+        query_samples = samples[support_size:]
+
+        for p in model.parameters():
+            p.requires_grad = False
+        for p in lora_params:
+            p.requires_grad = True
+        for a in meta_lrs:
+            a.requires_grad = True
+
+        base_params = OrderedDict(
+            {**dict(model.named_parameters()), **dict(model.named_buffers())})
+
+        query_losses = []
+        loss_dict = {}
+
+        for task_name in config.TASKS:
+            idxs = [i for i, n in enumerate(lora_names) if ('lora_shared_' in n) or (
+                    not config.MODEL.MTLORA.FREEZE_TS_LORA and f'.{task_name}' in n)]
+            task_params = [lora_params[i] for i in idxs]
+            task_alphas = [meta_lrs[i] for i in idxs]
+            task_names = [lora_names[i] for i in idxs]
+
+            starget = targets[task_name][:support_size]
+            qtarget = targets[task_name][support_size:]
+
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                sout = model.forward_task(support_samples, task_name)[task_name]
+                s_loss = criterion.loss_ft[task_name](sout, starget)
+                s_loss = criterion.loss_weights[task_name] * s_loss
+
+            grads = torch.autograd.grad(
+                s_loss,
+                task_params,
+                allow_unused=True,
+                create_graph=True,
+            )
+            grads = [torch.zeros_like(p) if g is None else g for p, g in zip(task_params, grads)]
+
+            adapted = base_params.copy()
+            for name, p, g, a_lr in zip(task_names, task_params, grads, task_alphas):
+                adapted[name] = p - a_lr * g
+
+            task_model = _TaskWrapper(model, task_name)
+
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                qout = functional_call(task_model, adapted, (query_samples,))
+                q_loss = criterion.loss_ft[task_name](qout, qtarget)
+                q_loss = criterion.loss_weights[task_name] * q_loss
+
+            query_losses.append(q_loss)
+            loss_dict[task_name] = q_loss.detach()
+
+        meta_loss = torch.stack(query_losses).mean()
+
+        grad_norm = loss_scaler(
+            meta_loss,
+            optimizer,
+            clip_grad=config.TRAIN.CLIP_GRAD,
+            parameters=list(meta_lrs) + lora_params,
+            update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0,
+        )
+
+        if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
+            optimizer.zero_grad()
+            lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
+
+        loss_scale_value = loss_scaler.state_dict()["scale"]
+
+        loss_meter.update(meta_loss.item())
+        if grad_norm is not None:
+            norm_meter.update(grad_norm)
+        scaler_meter.update(loss_scale_value)
+        batch_time.update(time.perf_counter() - end)
+        end = time.perf_counter()
+
+        if wandb_available:
+            metrics = {
+                "train/epoch_ndx": epoch,
+                "train/batch_ndx": idx,
+                "train/train_loss": loss_meter.val,
+                "train/train_loss_avg": loss_meter.avg,
+                "train/learning_rate": optimizer.param_groups[0]["lr"],
+                "train/weight_decay": optimizer.param_groups[0]['weight_decay'],
+                "train/time": batch_time.val,
+                "train/time_avg": batch_time.avg,
+                "train/grad_norm": norm_meter.val,
+                "train/grad_norm_avg": norm_meter.avg,
+                "train/loss_scale": scaler_meter.val,
+                "train/loss_scale_avg": scaler_meter.avg,
+                "train/memory": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
+            }
+            wandb.log(metrics)
+
+        if idx % config.PRINT_FREQ == 0:
+            lr = optimizer.param_groups[0]['lr']
+            wd = optimizer.param_groups[0]['weight_decay']
+            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+            etas = batch_time.avg * (num_steps - idx)
+            logger.info(
+                f'Meta-SGD Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
+                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
+                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
+                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
+                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
+                f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
+                f'mem {memory_used:.0f}MB')
+
+    epoch_time = time.perf_counter() - start
+    logger.info(
+        f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
+
 def reptile_train_one_epoch(
         config,
         model,
@@ -533,27 +732,34 @@ def reptile_train_one_epoch(
         for p in model.parameters():
             p.requires_grad = False
 
-        lora_params = [
-            p for n, p in model.named_parameters()
-            if 'lora_shared_' in n or 'lora_tasks_' in n
+        lora_shared_params = [
+            p for n, p in model.named_parameters() if 'lora_shared_' in n
         ]
+        lora_task_params = {
+            t: [
+                p for n, p in model.named_parameters()
+                if 'lora_tasks_' in n and f'.{t}' in n
+            ] for t in config.TASKS
+        }
+        lora_params = lora_shared_params + [p for params in lora_task_params.values() for p in params]
         for p in lora_params:
             p.requires_grad = True
 
-        init_state = [p.detach().clone() for p in lora_params]
-        diff_list = []
+        shared_init_state = [p.detach().clone() for p in lora_shared_params]
+        shared_diff_list = []
 
         task_losses = []
         loss_dict = {}
 
         for task_name in config.TASKS:
-            for p, init in zip(lora_params, init_state):
+            # reset shared parameters to their initial state for this task
+            for p, init in zip(lora_shared_params, shared_init_state):
                 p.data.copy_(init)
 
-            task_params = [
-                p for n, p in model.named_parameters()
-                if 'lora_shared_' in n or ('lora_tasks_' in n and f'.{task_name}' in n)
-            ]
+            task_specific_params = lora_task_params[task_name]
+            task_init_state = [p.detach().clone() for p in task_specific_params]
+
+            task_params = lora_shared_params + task_specific_params
 
             target = targets[task_name]
 
@@ -585,19 +791,22 @@ def reptile_train_one_epoch(
             task_losses.append(t_loss)
             loss_dict[task_name] = t_loss.detach()
 
-            current_diff = [p.data - init for p, init in zip(lora_params, init_state)]
-            diff_list.append(current_diff)
+            shared_diff = [p.data - init for p, init in zip(lora_shared_params, shared_init_state)]
+            shared_diff_list.append(shared_diff)
 
-            for p, init in zip(lora_params, init_state):
-                p.data.copy_(init)
+            meta_lr = optimizer.param_groups[0]['lr']
+            for p, init in zip(task_specific_params, task_init_state):
+                diff = p.data - init
+                p.data = init + meta_lr * diff
 
         meta_lr = optimizer.param_groups[0]['lr']
-        final_diff = [
-            torch.stack([d[i] for d in diff_list]).mean(0)
-            for i in range(len(lora_params))
-        ]
-        for p, init, d in zip(lora_params, init_state, final_diff):
-            p.data = init + meta_lr * d
+        if shared_diff_list:
+            final_diff = [
+                torch.stack([d[i] for d in shared_diff_list]).mean(0)
+                for i in range(len(lora_shared_params))
+            ]
+            for p, init, d in zip(lora_shared_params, shared_init_state, final_diff):
+                p.data = init + meta_lr * d
 
         lr_scheduler.step_update(epoch * num_steps + idx)
 
