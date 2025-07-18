@@ -367,7 +367,7 @@ def init_meta_sgd_lrs(model: Module, init_lr: float, freeze_ts: bool = False) ->
     model.meta_sgd_lrs = torch.nn.ParameterList(
         [torch.nn.Parameter(torch.full_like(p, init_lr)) for _, p in lora_named_params]
     )
-    model.meta_sgd_lr_map = {n: i for i, (n, _) in enumerate(lora_named_params)}
+    model.meta_sgd_lr_map = {f"model.{n}": i for i, (n, _) in enumerate(lora_named_params)}
 
 def maml_train_one_epoch(
         config,
@@ -561,7 +561,7 @@ def meta_sgd_train_one_epoch(
         if 'lora_shared_' in n or (
                 not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n)
     ]
-    lora_names = [n for n, _ in lora_named]
+    lora_names = [f"model.{n}" for n, _ in lora_named]
     lora_params = [p for _, p in lora_named]
 
     assert hasattr(model, 'meta_sgd_lrs'), 'call init_meta_sgd_lrs before training'
@@ -592,7 +592,11 @@ def meta_sgd_train_one_epoch(
             a.requires_grad = True
 
         base_params = OrderedDict(
-            {**dict(model.named_parameters()), **dict(model.named_buffers())})
+            {
+                **{f"model.{k}": v for k, v in model.named_parameters()},
+                **{f"model.{k}": v for k, v in model.named_buffers()},
+            }
+        )
 
         query_losses = []
         loss_dict = {}
