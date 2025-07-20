@@ -20,6 +20,7 @@ import torch.distributed as dist
 from torch.nn import Module
 from torch.nn.utils.stateless import functional_call
 from collections import OrderedDict
+from typing import Sequence
 
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import accuracy, AverageMeter
@@ -158,8 +159,11 @@ def main(config):
         model = build_mtl_model(model, config)
 
     if getattr(config.MODEL.MTLORA, 'METASGD_MODE', False):
-        init_meta_sgd_lrs(model, config.MODEL.MTLORA.METASGD_INIT,
-                          freeze_ts=config.MODEL.MTLORA.FREEZE_TS_LORA)
+        init_meta_sgd_lrs(
+            model,
+            config.MODEL.MTLORA.METASGD_INIT,
+            config.TASKS,
+            freeze_ts=config.MODEL.MTLORA.FREEZE_TS_LORA)
 
     n_parameters = sum(p.numel() for p in model.parameters())
     logger.info(f"number of params: {n_parameters / 1e6} M")
@@ -356,18 +360,35 @@ class _TaskWrapper(Module):
         return self.model.forward_task(x, self.task)[self.task]
 
 
-def init_meta_sgd_lrs(model: Module, init_lr: float, freeze_ts: bool = False) -> None:
-    """Attach per-parameter learnable inner-loop lrs to ``model`` for Meta-SGD."""
+def init_meta_sgd_lrs(
+        model: Module,
+        init_lr: float,
+        tasks: Sequence[str],
+        freeze_ts: bool = False) -> None:
+    """Attach grouped learnable inner-loop lrs to ``model`` for Meta-SGD.
 
-    lora_named_params = [
-        (n, p)
-        for n, p in model.named_parameters()
-        if 'lora_shared_' in n or (not freeze_ts and 'lora_tasks_' in n)
-    ]
+    A single lr is shared across all parameters of ``lora_shared_`` and one lr
+    per task is used for all ``lora_tasks_`` parameters belonging to that task.
+    """
+
+    # build mapping from task name to meta-lr index
+    group_map = {'shared': 0}
+    for i, t in enumerate(tasks, start=1):
+        group_map[t] = i
+
     model.meta_sgd_lrs = torch.nn.ParameterList(
-        [torch.nn.Parameter(torch.full_like(p, init_lr)) for _, p in lora_named_params]
+        [torch.nn.Parameter(torch.tensor(init_lr)) for _ in range(len(group_map))]
     )
-    model.meta_sgd_lr_map = {f"model.{n}": i for i, (n, _) in enumerate(lora_named_params)}
+    lr_map = {}
+    for n, _ in model.named_parameters():
+        if 'lora_shared_' in n:
+            lr_map[f"model.{n}"] = group_map['shared']
+        elif not freeze_ts and 'lora_tasks_' in n:
+            task_name = n.split('.')[-1]
+            if task_name in group_map:
+                lr_map[f"model.{n}"] = group_map[task_name]
+
+    model.meta_sgd_lr_map = lr_map
 
 def maml_train_one_epoch(
         config,
@@ -602,10 +623,11 @@ def meta_sgd_train_one_epoch(
         loss_dict = {}
 
         for task_name in config.TASKS:
-            idxs = [i for i, n in enumerate(lora_names) if ('lora_shared_' in n) or (
+            idxs = [i for i, n in enumerate(lora_names) if (
+                    'lora_shared_' in n) or (
                     not config.MODEL.MTLORA.FREEZE_TS_LORA and f'.{task_name}' in n)]
             task_params = [lora_params[i] for i in idxs]
-            task_alphas = [meta_lrs[i] for i in idxs]
+            task_alphas = [meta_lrs[lr_map[lora_names[i]]] for i in idxs]
             task_names = [lora_names[i] for i in idxs]
 
             starget = targets[task_name][:support_size]
