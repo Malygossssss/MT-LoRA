@@ -320,6 +320,12 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
                 config, model, criterion, data_loader_train, optimizer, epoch,
                 mixup_fn, lr_scheduler, loss_scaler, teacher=teacher
             )
+        elif getattr(config.MODEL.MTLORA, 'TAML_MODE', False):
+            print("--------------------TAML---------------------")
+            taml_train_one_epoch(
+                config, model, criterion, data_loader_train, optimizer, epoch,
+                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher
+            )
         elif config.MODEL.MTLORA.MAML_MODE:
             print("--------------------MAML---------------------")
             maml_train_one_epoch(
@@ -542,6 +548,177 @@ def maml_train_one_epoch(
             etas = batch_time.avg * (num_steps - idx)
             logger.info(
                 f'MAML Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
+                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
+                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
+                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
+                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
+                f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
+                f'mem {memory_used:.0f}MB')
+
+    epoch_time = time.perf_counter() - start
+    logger.info(
+        f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
+
+def taml_train_one_epoch(
+        config,
+        model,
+        criterion,
+        data_loader,
+        optimizer,
+        epoch,
+        mixup_fn,
+        lr_scheduler,
+        loss_scaler,
+        task=None,
+        teacher=None):
+    """Train one epoch using MAML with task-agnostic regularization."""
+
+    model.train()
+    optimizer.zero_grad()
+
+    num_steps = len(data_loader)
+    batch_time = AverageMeter()
+    loss_meter = AverageMeter()
+    norm_meter = AverageMeter()
+    scaler_meter = AverageMeter()
+
+    start = time.perf_counter()
+    end = time.perf_counter()
+    loss_dict = None
+
+    lambda_reg = getattr(config.MODEL.MTLORA, 'TAML_LAMBDA', 0.0)
+
+    for idx, batch in enumerate(data_loader):
+        samples = batch['image'].cuda(non_blocking=True)
+        targets = {t: batch[t].cuda(non_blocking=True) for t in config.TASKS}
+
+        if mixup_fn is not None:
+            samples, targets = mixup_fn(samples, targets)
+
+        batch_size = samples.size(0)
+        support_size = batch_size // 2
+        support_samples = samples[:support_size]
+        query_samples = samples[support_size:]
+
+        for p in model.parameters():
+            p.requires_grad = False
+
+        lora_params = [
+            p for n, p in model.named_parameters()
+            if 'lora_shared_' in n or (
+                    not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n
+            )
+        ]
+        for p in lora_params:
+            p.requires_grad = True
+
+        query_losses = []
+        adapted_params = []
+        loss_dict = {}
+
+        for task_name in config.TASKS:
+            task_params = [
+                p for n, p in model.named_parameters()
+                if 'lora_shared_' in n or (
+                        not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n and f'.{task_name}' in n
+                )
+            ]
+            backup = [p.detach().clone() for p in task_params]
+
+            starget = targets[task_name][:support_size]
+            qtarget = targets[task_name][support_size:]
+
+            inner_steps = max(1, config.MODEL.MTLORA.MAML_INNER_STEPS)
+            for _ in range(inner_steps):
+                with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                    sout = model.forward_task(support_samples, task_name)[task_name]
+                    s_loss = criterion.loss_ft[task_name](sout, starget)
+                    s_loss = criterion.loss_weights[task_name] * s_loss
+
+                grads = torch.autograd.grad(
+                    s_loss,
+                    task_params,
+                    allow_unused=True,
+                    create_graph=False,
+                )
+                grads = [torch.zeros_like(p) if g is None else g for p, g in zip(task_params, grads)]
+                inner_lr = config.MODEL.MTLORA.MAML_INNER_LR
+                for p, g in zip(task_params, grads):
+                    p.data = p.data - inner_lr * g
+
+            adapted_params.append([p.detach().clone() for p in task_params])
+
+            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+                qout = model.forward_task(query_samples, task_name)[task_name]
+                q_loss = criterion.loss_ft[task_name](qout, qtarget)
+                q_loss = criterion.loss_weights[task_name] * q_loss
+
+            query_losses.append(q_loss)
+            loss_dict[task_name] = q_loss.detach()
+
+            for p, b in zip(task_params, backup):
+                p.data.copy_(b)
+
+        meta_loss = torch.stack(query_losses).mean()
+
+        reg_loss = 0.0
+        if lambda_reg != 0.0 and adapted_params:
+            param_means = [torch.stack([ap[i] for ap in adapted_params]).mean(0) for i in range(len(adapted_params[0]))]
+            for ap in adapted_params:
+                for p, m in zip(ap, param_means):
+                    reg_loss = reg_loss + torch.sum((p - m) ** 2)
+            reg_loss = reg_loss / len(adapted_params)
+            total_loss = meta_loss + lambda_reg * reg_loss
+        else:
+            reg_loss = torch.tensor(0.0, device=meta_loss.device)
+            total_loss = meta_loss
+
+        grad_norm = loss_scaler(
+            total_loss,
+            optimizer,
+            clip_grad=config.TRAIN.CLIP_GRAD,
+            parameters=lora_params,
+            update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0,
+        )
+
+        if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
+            optimizer.zero_grad()
+            lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
+
+        loss_scale_value = loss_scaler.state_dict()["scale"]
+
+        loss_meter.update(total_loss.item())
+        if grad_norm is not None:
+            norm_meter.update(grad_norm)
+        scaler_meter.update(loss_scale_value)
+        batch_time.update(time.perf_counter() - end)
+        end = time.perf_counter()
+
+        if wandb_available:
+            metrics = {
+                "train/epoch_ndx": epoch,
+                "train/batch_ndx": idx,
+                "train/train_loss": loss_meter.val,
+                "train/train_loss_avg": loss_meter.avg,
+                "train/learning_rate": optimizer.param_groups[0]["lr"],
+                "train/weight_decay": optimizer.param_groups[0]['weight_decay'],
+                "train/time": batch_time.val,
+                "train/time_avg": batch_time.avg,
+                "train/grad_norm": norm_meter.val,
+                "train/grad_norm_avg": norm_meter.avg,
+                "train/loss_scale": scaler_meter.val,
+                "train/loss_scale_avg": scaler_meter.avg,
+                "train/memory": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
+            }
+            wandb.log(metrics)
+
+        if idx % config.PRINT_FREQ == 0:
+            lr = optimizer.param_groups[0]['lr']
+            wd = optimizer.param_groups[0]['weight_decay']
+            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+            etas = batch_time.avg * (num_steps - idx)
+            logger.info(
+                f'TAML Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
                 f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
                 f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
                 f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
