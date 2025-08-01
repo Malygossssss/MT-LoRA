@@ -8,6 +8,7 @@
 from .swin_transformer_mtlora import SwinTransformerMTLoRA
 from .swin_transformer import SwinTransformer
 from .swin_mtl import MultiTaskSwin
+from .conv_adapter import add_conv_adapters
 
 
 def build_model(config, is_pretrain=False):
@@ -68,6 +69,9 @@ def build_model(config, is_pretrain=False):
                                     fused_window_process=config.FUSED_WINDOW_PROCESS)
     else:
         raise NotImplementedError(f"Unkown model: {model_type}")
+
+    if config.MODEL.CONV_ADAPTER.ENABLED:
+        add_conv_adapters(model)
 
     return model
 

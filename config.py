@@ -325,6 +325,9 @@ _C.MODEL.MTLORA.FC2_ENABLED = True
 _C.MODEL.MTLORA.DOWNSAMPLER_ENABLED = False
 _C.MODEL.MTLORA.FREEZE_TS_LORA = False
 
+# Convolution adaptation with depthwise separable adapters
+_C.MODEL.CONV_ADAPTER = CN()
+_C.MODEL.CONV_ADAPTER.ENABLED = False
 
 def _update_config_from_file(config, cfg_file):
     config.defrost()
