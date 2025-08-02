@@ -30,7 +30,7 @@ from models import build_model, build_mtl_model
 from data import build_loader
 from lr_scheduler import build_scheduler
 from optimizer import build_optimizer
-from logger import create_logger
+from logger import create_logger, create_eval_logger
 from utils import load_checkpoint, load_pretrained, save_checkpoint, NativeScalerWithGradNormCount, auto_resume_helper
 
 from mtl_loss_schemes import MultiTaskLoss, get_loss
@@ -1337,7 +1337,9 @@ if __name__ == '__main__':
     os.makedirs(config.OUTPUT, exist_ok=True)
     logger = create_logger(output_dir=config.OUTPUT,
                            dist_rank=dist.get_rank(), name=f"{config.MODEL.NAME}")
-
+    eval_logger = create_eval_logger(output_dir=config.OUTPUT,
+                                     dist_rank=dist.get_rank(),
+                                     filename=f'eval_rank{dist.get_rank()}.txt')
     if dist.get_rank() == 0:
         path = os.path.join(config.OUTPUT, "config.json")
         with open(path, "w") as f:

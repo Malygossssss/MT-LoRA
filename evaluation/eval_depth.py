@@ -14,6 +14,9 @@ import glob
 import torch
 import json
 import scipy.io as sio
+import logging
+
+eval_logger = logging.getLogger('eval')
 
 
 def eval_depth(loader, folder):
@@ -25,7 +28,7 @@ def eval_depth(loader, folder):
     for i, sample in enumerate(loader):
 
         if i % 500 == 0:
-            print('Evaluating depth: {} of {} objects'.format(i, len(loader)))
+            eval_logger.info('Evaluating depth: {} of {} objects'.format(i, len(loader)))
 
         # Load result
         filename = os.path.join(folder, sample['meta']['image'] + '.mat')
@@ -91,12 +94,12 @@ class DepthMeter(object):
         eval_result['log_rmse'] = np.sqrt(self.total_log_rmses / self.n_valid)
 
         if verbose:
-            print('Results for depth prediction')
+            eval_logger.info('Results for depth prediction')
             for x in eval_result:
                 spaces = ''
                 for j in range(0, 15 - len(x)):
                     spaces += ' '
-                print('{0:s}{1:s}{2:.4f}'.format(x, spaces, eval_result[x]))
+                eval_logger.info('{0:s}{1:s}{2:.4f}'.format(x, spaces, eval_result[x]))
 
         return eval_result
         
@@ -116,17 +119,17 @@ def eval_depth_predictions(database, save_dir, overfit=False):
     fname = os.path.join(save_dir, base_name + '.json')
 
     # Eval the model
-    print('Evaluate the saved images (depth)')
+    eval_logger.info('Evaluate the saved images (depth)')
     eval_results = eval_depth(db, os.path.join(save_dir, 'depth'))
     with open(fname, 'w') as f:
         json.dump(eval_results, f)
 
     # Print results
-    print('Results for Depth Estimation')
+    eval_logger.info('Results for Depth Estimation')
     for x in eval_results:
         spaces = ''
         for j in range(0, 15 - len(x)):
             spaces += ' '
-        print('{0:s}{1:s}{2:.4f}'.format(x, spaces, eval_results[x]))
+        eval_logger.info('{0:s}{1:s}{2:.4f}'.format(x, spaces, eval_results[x]))
 
     return eval_results

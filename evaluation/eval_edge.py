@@ -7,8 +7,11 @@ import glob
 import json
 import torch
 import numpy as np
+import logging
 from utils import mkdir_if_missing
 from mtl_loss_schemes import BalancedCrossEntropyLoss
+
+eval_logger = logging.getLogger('eval')
 
 
 class EdgeMeter(object):
@@ -35,7 +38,7 @@ class EdgeMeter(object):
         eval_dict = {'loss': self.loss / self.n}
 
         if verbose:
-            print('\nEdge Detection Evaluation')
-            print('Edge Detection Loss %.3f' % (eval_dict['loss']))
+            eval_logger.info('\nEdge Detection Evaluation')
+            eval_logger.info('Edge Detection Loss %.3f' % (eval_dict['loss']))
 
         return eval_dict

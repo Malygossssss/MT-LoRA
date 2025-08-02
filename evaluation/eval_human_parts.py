@@ -14,6 +14,9 @@ import os.path
 import numpy as np
 import torch
 from PIL import Image
+import logging
+
+eval_logger = logging.getLogger('eval')
 
 PART_CATEGORY_NAMES = ['background', 'head', 'torso', 'uarm', 'larm', 'uleg', 'lleg']
 
@@ -28,7 +31,7 @@ def eval_human_parts(loader, folder, n_parts=6):
     for i, sample in enumerate(loader):
 
         if i % 500 == 0:
-            print('Evaluating: {} of {} objects'.format(i, len(loader)))
+            eval_logger.info('Evaluating: {} of {} objects'.format(i, len(loader)))
 
         if 'human_parts' not in sample:
             continue
@@ -62,7 +65,7 @@ def eval_human_parts(loader, folder, n_parts=6):
             fp[i_part] += np.sum(~tmp_gt & tmp_pred & (valid))
             fn[i_part] += np.sum(tmp_gt & ~tmp_pred & (valid))
 
-    print('Successful evaluation for {} images'.format(counter))
+    eval_logger.info('Successful evaluation for {} images'.format(counter))
     jac = [0] * (n_parts + 1)
     for i_part in range(0, n_parts + 1):
         jac[i_part] = float(tp[i_part]) / max(float(tp[i_part] + fp[i_part] + fn[i_part]), 1e-8)
@@ -110,14 +113,14 @@ class HumanPartsMeter(object):
         eval_result = dict()
         eval_result['jaccards_all_categs'] = jac
         eval_result['mIoU'] = np.mean(jac)
-        
-        print('\nHuman Parts mIoU: {0:.4f}\n'.format(100 * eval_result['mIoU']))
+
+        eval_logger.info('\nHuman Parts mIoU: {0:.4f}\n'.format(100 * eval_result['mIoU']))
         class_IoU = jac
         for i in range(len(class_IoU)):
             spaces = ''
             for j in range(0, 15 - len(self.cat_names[i])):
                 spaces += ' '
-            print('{0:s}{1:s}{2:.4f}'.format(self.cat_names[i], spaces, 100 * class_IoU[i]))
+            eval_logger.info('{0:s}{1:s}{2:.4f}'.format(self.cat_names[i], spaces, 100 * class_IoU[i]))
 
         return eval_result
 
@@ -139,7 +142,7 @@ def eval_human_parts_predictions(database, save_dir, overfit=False):
     fname = os.path.join(save_dir, base_name + '.json')
 
     # Eval the model
-    print('Evaluate the saved images (human parts)')
+    eval_logger.info('Evaluate the saved images (human parts)')
     eval_results = eval_human_parts(db, os.path.join(save_dir, 'human_parts'))
     with open(fname, 'w') as f:
         json.dump(eval_results, f)
@@ -148,11 +151,11 @@ def eval_human_parts_predictions(database, save_dir, overfit=False):
     class_IoU = eval_results['jaccards_all_categs']
     mIoU = eval_results['mIoU']
 
-    print('\nHuman Parts mIoU: {0:.4f}\n'.format(100 * mIoU))
+    eval_logger.info('\nHuman Parts mIoU: {0:.4f}\n'.format(100 * mIoU))
     for i in range(len(class_IoU)):
         spaces = ''
         for j in range(0, 15 - len(PART_CATEGORY_NAMES[i])):
             spaces += ' '
-        print('{0:s}{1:s}{2:.4f}'.format(PART_CATEGORY_NAMES[i], spaces, 100 * class_IoU[i]))
+        eval_logger.info('{0:s}{1:s}{2:.4f}'.format(PART_CATEGORY_NAMES[i], spaces, 100 * class_IoU[i]))
 
     return eval_results

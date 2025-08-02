@@ -14,7 +14,9 @@ import json
 import numpy as np
 import torch
 from PIL import Image
+import logging
 
+eval_logger = logging.getLogger('eval')
 
 VOC_CATEGORY_NAMES = ['background',
                       'aeroplane', 'bicycle', 'bird', 'boat', 'bottle',
@@ -45,7 +47,7 @@ def eval_semseg(loader, folder, n_classes=20, has_bg=True, ignore_index=255):
     for i, sample in enumerate(loader):
 
         if i % 500 == 0:
-            print('Evaluating: {} of {} objects'.format(i, len(loader)))
+            eval_logger.info('Evaluating: {} of {} objects'.format(i, len(loader)))
 
         # Load result
         filename = os.path.join(folder, sample['meta']['image'] + '.png')
@@ -131,14 +133,14 @@ class SemsegMeter(object):
         eval_result['mIoU'] = np.mean(jac)
 
         if verbose:
-            print('\nSemantic Segmentation mIoU: {0:.4f}\n'.format(
+            eval_logger.info('\nSemantic Segmentation mIoU: {0:.4f}\n'.format(
                 100 * eval_result['mIoU']))
             class_IoU = eval_result['jaccards_all_categs']
             for i in range(len(class_IoU)):
                 spaces = ''
                 for j in range(0, 20 - len(self.cat_names[i])):
                     spaces += ' '
-                print('{0:s}{1:s}{2:.4f}'.format(
+                eval_logger.info('{0:s}{1:s}{2:.4f}'.format(
                     self.cat_names[i], spaces, 100 * class_IoU[i]))
 
         return eval_result
@@ -174,7 +176,7 @@ def eval_semseg_predictions(database, save_dir, overfit=False):
     fname = os.path.join(save_dir, base_name + '.json')
 
     # Eval the model
-    print('Evaluate the saved images (semseg)')
+    eval_logger.info('Evaluate the saved images (semseg)')
     eval_results = eval_semseg(db, os.path.join(
         save_dir, 'semseg'), n_classes=n_classes, has_bg=has_bg, ignore_index=ignore_index)
     with open(fname, 'w') as f:
@@ -184,12 +186,12 @@ def eval_semseg_predictions(database, save_dir, overfit=False):
     class_IoU = eval_results['jaccards_all_categs']
     mIoU = eval_results['mIoU']
 
-    print('\nSemantic Segmentation mIoU: {0:.4f}\n'.format(100 * mIoU))
+    eval_logger.info('\nSemantic Segmentation mIoU: {0:.4f}\n'.format(100 * mIoU))
     for i in range(len(class_IoU)):
         spaces = ''
         for j in range(0, 15 - len(cat_names[i])):
             spaces += ' '
-        print('{0:s}{1:s}{2:.4f}'.format(
+        eval_logger.info('{0:s}{1:s}{2:.4f}'.format(
             cat_names[i], spaces, 100 * class_IoU[i]))
 
     return eval_results
