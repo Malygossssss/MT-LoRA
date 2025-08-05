@@ -198,6 +198,14 @@ _C.TRAIN.LR_SCHEDULER.DECAY_RATE = 0.1
 _C.TRAIN.LR_SCHEDULER.WARMUP_PREFIX = True
 # [SimMIM] Gamma / Multi steps value, used in MultiStepLRScheduler
 _C.TRAIN.LR_SCHEDULER.GAMMA = 0.1
+
+# -----------------------------------------------------------------------------
+# Reinforcement learning settings for dynamic task weighting
+# -----------------------------------------------------------------------------
+_C.RL = CN()
+_C.RL.ENABLED = False
+_C.RL.HIDDEN_DIM = 64
+_C.RL.LR = 1e-3
 _C.TRAIN.LR_SCHEDULER.MULTISTEPS = []
 _C.TRAIN.SKIP_DECODER_CKPT = False
 

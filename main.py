@@ -300,6 +300,22 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
     # for name, param in model.named_parameters():
     #     if 'lora_shared_' in name:
     #         print(name)
+    if getattr(config, 'RL', None) and config.RL.ENABLED:
+        train_with_rl(
+            config,
+            model,
+            criterion,
+            data_loader_train,
+            data_loader_val,
+            optimizer,
+            lr_scheduler,
+            loss_scaler,
+            mixup_fn,
+            logger,
+            teacher,
+        )
+        return
+
     start_time = time.perf_counter()
 
     epoch = 0
@@ -1062,6 +1078,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     start = time.perf_counter()
     end = time.perf_counter()
     loss_dict = None
+    task_loss_meters = {t: AverageMeter() for t in config.TASKS} if config.MTL else None
 
     for idx, batch in enumerate(data_loader):
         if not config.MTL:
@@ -1101,6 +1118,10 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if grad_norm is not None:  # loss_scaler return None if not update
             norm_meter.update(grad_norm)
         scaler_meter.update(loss_scale_value)
+        if config.MTL and loss_dict is not None:
+            for t in config.TASKS:
+                if t in loss_dict:
+                    task_loss_meters[t].update(loss_dict[t].item())
         batch_time.update(time.perf_counter() - end)
         end = time.perf_counter()
         if wandb_available:
@@ -1173,7 +1194,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     epoch_time = time.perf_counter() - start
     logger.info(
         f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
-
+    if config.MTL:
+        return {t: m.avg for t, m in task_loss_meters.items()}
+    return None
 
 @torch.no_grad()
 def validate(config, data_loader, model, epoch):
@@ -1265,6 +1288,99 @@ def validate(config, data_loader, model, epoch):
         wandb.log(scores_logs)
 
     return eval_results
+
+def train_with_rl(
+        config,
+        model,
+        criterion,
+        data_loader_train,
+        data_loader_val,
+        optimizer,
+        lr_scheduler,
+        loss_scaler,
+        mixup_fn,
+        logger,
+        teacher=None,
+):
+    """Training loop with RL-based task weighting."""
+    from rl_agent import TaskWeightAgent, extract_task_metrics, build_state, compute_reward
+
+    state_dim = len(config.TASKS) * 2
+    rl_agent = TaskWeightAgent(
+        state_dim,
+        len(config.TASKS),
+        hidden_dim=config.RL.HIDDEN_DIM,
+        lr=config.RL.LR,
+    )
+    prev_metrics = None
+    prev_losses = None
+
+    max_accuracy = 0.0
+    model_without_ddp = model
+    start_time = time.perf_counter()
+    for epoch in range(config.TRAIN.EPOCHS):
+        if not config.MTL:
+            data_loader_train.sampler.set_epoch(epoch)
+
+        state = build_state(config.TASKS, prev_losses, prev_metrics)
+        weights = rl_agent.select_weights(state)
+        criterion.update_weights({t: float(w) for t, w in zip(config.TASKS, weights)})
+
+        train_losses = None
+        if getattr(config.MODEL.MTLORA, 'REPTILE_MODE', False):
+            print("--------------------REPTILE---------------------")
+            reptile_train_one_epoch(
+                config, model, criterion, data_loader_train, optimizer, epoch,
+                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
+            )
+        elif getattr(config.MODEL.MTLORA, 'METASGD_MODE', False):
+            print("--------------------Meta-SGD---------------------")
+            meta_sgd_train_one_epoch(
+                config, model, criterion, data_loader_train, optimizer, epoch,
+                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
+            )
+        elif getattr(config.MODEL.MTLORA, 'TAML_MODE', False):
+            print("--------------------TAML---------------------")
+            taml_train_one_epoch(
+                config, model, criterion, data_loader_train, optimizer, epoch,
+                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
+            )
+        elif config.MODEL.MTLORA.MAML_MODE:
+            print("--------------------MAML---------------------")
+            maml_train_one_epoch(
+                config, model, criterion, data_loader_train, optimizer, epoch,
+                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
+            )
+        else:
+            print("--------------------MT-LORA---------------------")
+            train_losses = train_one_epoch(
+                config, model, criterion, data_loader_train, optimizer, epoch,
+                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
+            )
+
+        if dist.get_rank() == 0 and (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
+            save_checkpoint(
+                config,
+                epoch,
+                model_without_ddp,
+                max_accuracy,
+                optimizer,
+                lr_scheduler,
+                loss_scaler,
+                logger,
+            )
+
+        eval_results = validate(config, data_loader_val, model, epoch)
+        current_metrics = extract_task_metrics(eval_results, config.TASKS)
+        reward = compute_reward(current_metrics, prev_metrics)
+        rl_agent.update(reward)
+        prev_metrics = current_metrics
+        prev_losses = train_losses
+
+    validate(config, data_loader_val, model, epoch)
+    total_time = time.perf_counter() - start_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    logger.info('Training time {}'.format(total_time_str))
 
 
 @torch.no_grad()

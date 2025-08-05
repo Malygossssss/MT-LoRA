@@ -1,4 +1,7 @@
+from typing import List
+
 import torch.nn as nn
+
 
 class DepthwiseSeparableConv(nn.Module):
     """A depthwise separable convolution block."""
@@ -55,10 +58,18 @@ class ConvAdapter(nn.Module):
         return out + self.adapter(x)
 
 
-def add_conv_adapters(model: nn.Module) -> None:
-    """Recursively replace Conv2d modules with ConvAdapter."""
+def add_conv_adapters(model: nn.Module, prefix: str = "") -> List[str]:
+    """Recursively replace Conv2d modules with ConvAdapter.
+
+    Returns a list with the names of layers that were replaced.
+    """
+
+    replaced = []
     for name, module in list(model.named_children()):
+        full_name = f"{prefix}{name}"
         if isinstance(module, nn.Conv2d):
             setattr(model, name, ConvAdapter(module))
+            replaced.append(full_name)
         else:
-            add_conv_adapters(module)
+            replaced.extend(add_conv_adapters(module, prefix=f"{full_name}."))
+    return replaced

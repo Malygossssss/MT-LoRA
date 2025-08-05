@@ -227,6 +227,11 @@ class MultiTaskLoss(nn.Module):
             [self.loss_weights[t] * out[t] for t in self.tasks]))
         return out['total'], out
 
+    def update_weights(self, new_weights: dict):
+        """Update task-specific loss weights."""
+        assert set(new_weights.keys()) == set(self.tasks)
+        self.loss_weights.update(new_weights)
+
 
 def get_loss(task_cfg, task=None, config={"DATA": {}}):
     """ Return loss function for a specific task """

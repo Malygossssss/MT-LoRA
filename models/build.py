@@ -71,7 +71,13 @@ def build_model(config, is_pretrain=False):
         raise NotImplementedError(f"Unkown model: {model_type}")
 
     if config.MODEL.CONV_ADAPTER.ENABLED:
-        add_conv_adapters(model)
+        replaced = add_conv_adapters(model)
+        if replaced:
+            print("ConvAdapter replaced layers:")
+            for layer in replaced:
+                print(f" - {layer}")
+        else:
+            print("ConvAdapter enabled but no Conv2d layers were found.")
 
     return model
 
