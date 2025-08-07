@@ -80,7 +80,7 @@ def build_model(config, is_pretrain=False):
         else:
             print("ConvAdapter enabled but no Conv2d layers were found.")
     if config.MODEL.MTLORA.ENABLED and getattr(config.MODEL.MTLORA, 'DYNAMIC_TS_LORA', False):
-        replace_ts_lora_with_dynamic(model)
+        replace_ts_lora_with_dynamic(model, config.MODEL.MTLORA.TS_LORA_NUM)
 
     return model
 

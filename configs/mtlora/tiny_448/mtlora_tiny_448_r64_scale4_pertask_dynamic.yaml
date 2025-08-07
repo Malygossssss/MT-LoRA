@@ -27,6 +27,7 @@ MODEL:
     FC2_ENABLED: True
     DOWNSAMPLER_ENABLED: False
     DYNAMIC_TS_LORA: True
+    TS_LORA_NUM: 8
     R_PER_TASK:
       semseg: [4]
       normals: [4]

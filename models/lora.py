@@ -697,7 +697,7 @@ def freeze_task_specific_lora(model: nn.Module) -> None:
         if 'lora_tasks_' in name or 'lora_task_scale' in name:
             param.requires_grad = False
 
-def replace_ts_lora_with_dynamic(model: nn.Module, alpha: float = 1.0) -> None:
+def replace_ts_lora_with_dynamic(model: nn.Module, num_ts_lora: int, alpha: float = 1.0) -> None:
     """Replace task specific LoRA weights with :class:`DynamicInputTSLoRAModule`.
 
     After replacement each module will contain a ``ts_lora`` attribute providing
@@ -711,16 +711,14 @@ def replace_ts_lora_with_dynamic(model: nn.Module, alpha: float = 1.0) -> None:
             in_dim = module.lora_tasks_A[tasks[0]].size(1)
             out_dim = module.lora_tasks_B[tasks[0]].size(0)
             r = module.lora_tasks_A[tasks[0]].size(0)
-            A_list = [module.lora_tasks_A[t] for t in tasks]
-            B_list = []
-            for t in tasks:
-                scale = module.lora_task_scale[t]
+            t = num_ts_lora if num_ts_lora > 0 else len(tasks)
+            dyn = DynamicInputTSLoRAModule(in_dim, out_dim, r, t, alpha)
+            for i, task in enumerate(tasks[:t]):
+                dyn.A_list[i].data.copy_(module.lora_tasks_A[task].data)
+                scale = module.lora_task_scale[task]
                 if isinstance(scale, torch.Tensor):
                     scale = scale.item()
-                B_list.append(module.lora_tasks_B[t] * scale)
-            dyn = DynamicInputTSLoRAModule(in_dim, out_dim, r, len(tasks), alpha)
-            dyn.A_list = nn.ParameterList(A_list)
-            dyn.B_list = nn.ParameterList(B_list)
+                dyn.B_list[i].data.copy_(module.lora_tasks_B[task].data * scale)
             module.ts_lora = dyn
             del module.lora_tasks_A
             del module.lora_tasks_B

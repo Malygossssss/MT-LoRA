@@ -157,7 +157,7 @@ def main(config):
     teacher = None
     model = build_model(config)
     if config.MODEL.MTLORA.ENABLED and getattr(config.MODEL.MTLORA, 'DYNAMIC_TS_LORA', False):
-        replace_ts_lora_with_dynamic(model)
+        replace_ts_lora_with_dynamic(model, config.MODEL.MTLORA.TS_LORA_NUM)
     if config.MTL:
         model = build_mtl_model(model, config)
 
