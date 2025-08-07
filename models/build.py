@@ -9,6 +9,7 @@ from .swin_transformer_mtlora import SwinTransformerMTLoRA
 from .swin_transformer import SwinTransformer
 from .swin_mtl import MultiTaskSwin
 from .conv_adapter import add_conv_adapters
+from .lora import replace_ts_lora_with_dynamic
 
 
 def build_model(config, is_pretrain=False):
@@ -78,6 +79,8 @@ def build_model(config, is_pretrain=False):
                 print(f" - {layer}")
         else:
             print("ConvAdapter enabled but no Conv2d layers were found.")
+    if config.MODEL.MTLORA.ENABLED and getattr(config.MODEL.MTLORA, 'DYNAMIC_TS_LORA', False):
+        replace_ts_lora_with_dynamic(model)
 
     return model
 

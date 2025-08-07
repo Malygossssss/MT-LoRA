@@ -42,6 +42,7 @@ from models.lora import (
     consolidate_task_lora_to_shared,
     print_lora_layer_summary,
     freeze_task_specific_lora,
+    replace_ts_lora_with_dynamic,
 )
 
 try:
@@ -155,6 +156,8 @@ def main(config):
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     teacher = None
     model = build_model(config)
+    if config.MODEL.MTLORA.ENABLED and getattr(config.MODEL.MTLORA, 'DYNAMIC_TS_LORA', False):
+        replace_ts_lora_with_dynamic(model)
     if config.MTL:
         model = build_mtl_model(model, config)
 

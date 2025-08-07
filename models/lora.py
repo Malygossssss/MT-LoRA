@@ -148,6 +148,73 @@ class LoRALinear(LoRALayer):
         return pretrained + lora
 
 
+class DynamicInputTSLoRAModule(nn.Module):
+    """Dynamically routes input through multiple task-specific LoRA adapters.
+
+    For each input vector ``x`` this module generates routing weights that are
+    used to form a weighted combination of task specific LoRA parameters. The
+    resulting low-rank adaptation is applied to ``x`` and scaled by ``alpha``.
+
+    Args:
+        in_dim: Dimension of the input features.
+        out_dim: Dimension of the LoRA output.
+        r: Rank of each LoRA adapter.
+        t: Number of task specific LoRA adapters.
+        alpha: Scaling factor applied to the LoRA output.
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, r: int, t: int, alpha: float) -> None:
+        super().__init__()
+        self.alpha = alpha
+        self.A_list = nn.ParameterList(
+            [nn.Parameter(torch.empty(r, in_dim)) for _ in range(t)])
+        self.B_list = nn.ParameterList(
+            [nn.Parameter(torch.empty(out_dim, r)) for _ in range(t)])
+        self.W_route = nn.Linear(in_dim, t)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.W_route.reset_parameters()
+        for A, B in zip(self.A_list, self.B_list):
+            nn.init.kaiming_uniform_(A, a=math.sqrt(5))
+            nn.init.zeros_(B)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute the dynamically fused LoRA adaptation for ``x``.
+
+        This implementation supports inputs with arbitrary leading dimensions
+        (e.g. ``[batch, tokens, in_dim]``) by operating on a flattened view and
+        restoring the original shape afterwards.
+
+        Args:
+            x: Input tensor ending with dimension ``in_dim``.
+
+        Returns:
+            LoRA adaptation tensor with the same leading dimensions as ``x``
+            and trailing dimension ``out_dim``.
+        """
+
+        orig_shape = x.shape
+        x_flat = x.reshape(-1, orig_shape[-1])  # [B*, in_dim]
+
+        # Compute routing weights from the input itself
+        weights = torch.softmax(self.W_route(x_flat), dim=-1)  # [B*, T]
+
+        # Stack parameters for efficient batch processing
+        A = torch.stack(list(self.A_list), dim=0)  # [T, r, in_dim]
+        B = torch.stack(list(self.B_list), dim=0)  # [T, out_dim, r]
+
+        # Form dynamic LoRA parameters for each sample in the batch
+        A_dyn = torch.einsum('bt,trd->brd', weights, A)  # [B*, r, in_dim]
+        B_dyn = torch.einsum('bt,tdr->bdr', weights, B)  # [B*, out_dim, r]
+
+        # Apply the low-rank adaptation without explicit loops over batch
+        after_A = torch.einsum('bd,brd->br', x_flat, A_dyn)  # [B*, r]
+        lora_out = torch.einsum('br,bdr->bd', after_A, B_dyn)  # [B*, out_dim]
+
+        return self.alpha * lora_out.view(*orig_shape[:-1], -1)
+
+
 class MTLoRALinear(LoRALayer):
     # LoRA implemented in a dense layer
     def __init__(
@@ -272,6 +339,9 @@ class MTLoRALinear(LoRALayer):
             } if self.tasks is not None else None
             lora = self.lora_norm(torch.sum(torch.stack(
                 list(lora_tasks.values()), dim=0), dim=0))
+        if hasattr(self, 'ts_lora'):
+            lora = lora + self.ts_lora(x)
+            lora_tasks = None
 
         return pretrained + lora, lora_tasks
 
@@ -582,7 +652,7 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", freeze_pat
     Raises:
         NotImplementedError: if `bias` not in ["none", "lora_only", "all"]
     """
-    def lora_filter(key): return "lora_" in key
+    def lora_filter(key): return "lora_" in key or "ts_lora" in key
     def patch_embed_filter(
         key): return not freeze_patch_embed and "patch_embed" in key
 
@@ -626,6 +696,37 @@ def freeze_task_specific_lora(model: nn.Module) -> None:
     for name, param in model.named_parameters():
         if 'lora_tasks_' in name or 'lora_task_scale' in name:
             param.requires_grad = False
+
+def replace_ts_lora_with_dynamic(model: nn.Module, alpha: float = 1.0) -> None:
+    """Replace task specific LoRA weights with :class:`DynamicInputTSLoRAModule`.
+
+    After replacement each module will contain a ``ts_lora`` attribute providing
+    the dynamic routing behaviour while original task specific parameters are
+    removed.
+    """
+
+    for module in model.modules():
+        if hasattr(module, "lora_tasks_A") and module.lora_tasks_A:
+            tasks = list(module.lora_tasks_A.keys())
+            in_dim = module.lora_tasks_A[tasks[0]].size(1)
+            out_dim = module.lora_tasks_B[tasks[0]].size(0)
+            r = module.lora_tasks_A[tasks[0]].size(0)
+            A_list = [module.lora_tasks_A[t] for t in tasks]
+            B_list = []
+            for t in tasks:
+                scale = module.lora_task_scale[t]
+                if isinstance(scale, torch.Tensor):
+                    scale = scale.item()
+                B_list.append(module.lora_tasks_B[t] * scale)
+            dyn = DynamicInputTSLoRAModule(in_dim, out_dim, r, len(tasks), alpha)
+            dyn.A_list = nn.ParameterList(A_list)
+            dyn.B_list = nn.ParameterList(B_list)
+            module.ts_lora = dyn
+            del module.lora_tasks_A
+            del module.lora_tasks_B
+            del module.lora_task_scale
+            module.tasks = None
+
 
 def consolidate_task_lora_to_shared(model: nn.Module) -> None:
     """Convert all task specific LoRA weights to shared LoRA weights."""
@@ -673,7 +774,7 @@ def print_lora_layer_summary(model: nn.Module) -> None:
         print("No TS-LoRA layers remain. Model ready for TA-LoRA training.")
 
 def lora_filter(key: str, value: Any) -> bool:
-    return "lora_" in key
+    return "lora_" in key or "ts_lora" in key
 
 
 def merge_lora_weights(model) -> None:
