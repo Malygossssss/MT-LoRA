@@ -42,6 +42,7 @@ from models.lora import (
     consolidate_task_lora_to_shared,
     print_lora_layer_summary,
     freeze_task_specific_lora,
+    freeze_task_agnostic_lora,
     replace_ts_lora_with_dynamic,
 )
 
@@ -166,7 +167,8 @@ def main(config):
             model,
             config.MODEL.MTLORA.METASGD_INIT,
             config.TASKS,
-            freeze_ts=config.MODEL.MTLORA.FREEZE_TS_LORA)
+            freeze_ts=config.MODEL.MTLORA.FREEZE_TS_LORA,
+            freeze_ta=config.MODEL.MTLORA.FREEZE_TA_LORA)
 
     n_parameters = sum(p.numel() for p in model.parameters())
     logger.info(f"number of params: {n_parameters / 1e6} M")
@@ -275,6 +277,8 @@ def main(config):
                                         freeze_downsample_reduction=True if config.MODEL.MTLORA.DOWNSAMPLER_ENABLED else config.TRAIN.FREEZE_DOWNSAMPLE_REDUCTION)
             if config.MODEL.MTLORA.FREEZE_TS_LORA:
                 freeze_task_specific_lora(model.backbone)
+            if config.MODEL.MTLORA.FREEZE_TA_LORA:
+                freeze_task_agnostic_lora(model.backbone)
         else:
             print("Marking all layers as trainable")
     if config.MODEL.FREEZE_BACKBONE:
@@ -389,7 +393,8 @@ def init_meta_sgd_lrs(
         model: Module,
         init_lr: float,
         tasks: Sequence[str],
-        freeze_ts: bool = False) -> None:
+        freeze_ts: bool = False,
+        freeze_ta: bool = False) -> None:
     """Attach grouped learnable inner-loop lrs to ``model`` for Meta-SGD.
 
     A single lr is shared across all parameters of ``lora_shared_`` and one lr
@@ -406,7 +411,7 @@ def init_meta_sgd_lrs(
     )
     lr_map = {}
     for n, _ in model.named_parameters():
-        if 'lora_shared_' in n:
+        if 'lora_shared_' in n and not freeze_ta:
             lr_map[f"model.{n}"] = group_map['shared']
         elif not freeze_ts and 'lora_tasks_' in n:
             task_name = n.split('.')[-1]
@@ -465,7 +470,7 @@ def maml_train_one_epoch(
 
         lora_params = [
             p for n, p in model.named_parameters()
-            if 'lora_shared_' in n or (
+            if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
                     not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n
             )
         ]
@@ -478,7 +483,7 @@ def maml_train_one_epoch(
         for task_name in config.TASKS:
             task_params = [
                 p for n, p in model.named_parameters()
-                if 'lora_shared_' in n or (
+                if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
                         not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n and f'.{task_name}' in n
                 )
             ]
@@ -624,7 +629,7 @@ def taml_train_one_epoch(
 
         lora_params = [
             p for n, p in model.named_parameters()
-            if 'lora_shared_' in n or (
+            if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
                     not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n
             )
         ]
@@ -638,7 +643,7 @@ def taml_train_one_epoch(
         for task_name in config.TASKS:
             task_params = [
                 p for n, p in model.named_parameters()
-                if 'lora_shared_' in n or (
+                if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
                         not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n and f'.{task_name}' in n
                 )
             ]
@@ -775,7 +780,7 @@ def meta_sgd_train_one_epoch(
     lora_named = [
         (n, p)
         for n, p in model.named_parameters()
-        if 'lora_shared_' in n or (
+        if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
                 not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n)
     ]
     lora_names = [f"model.{n}" for n, _ in lora_named]
@@ -820,7 +825,7 @@ def meta_sgd_train_one_epoch(
 
         for task_name in config.TASKS:
             idxs = [i for i, n in enumerate(lora_names) if (
-                    'lora_shared_' in n) or (
+                    'lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
                     not config.MODEL.MTLORA.FREEZE_TS_LORA and f'.{task_name}' in n)]
             task_params = [lora_params[i] for i in idxs]
             task_alphas = [meta_lrs[lr_map[lora_names[i]]] for i in idxs]
@@ -955,12 +960,12 @@ def reptile_train_one_epoch(
             p.requires_grad = False
 
         lora_shared_params = [
-            p for n, p in model.named_parameters() if 'lora_shared_' in n
+            p for n, p in model.named_parameters() if 'lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA
         ]
         lora_task_params = {
             t: [
                 p for n, p in model.named_parameters()
-                if 'lora_tasks_' in n and f'.{t}' in n
+                if not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n and f'.{t}' in n
             ] for t in config.TASKS
         }
         lora_params = lora_shared_params + [p for params in lora_task_params.values() for p in params]
