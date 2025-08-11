@@ -335,6 +335,7 @@ _C.MODEL.MTLORA.FREEZE_TS_LORA = False
 _C.MODEL.MTLORA.FREEZE_TA_LORA = False
 _C.MODEL.MTLORA.DYNAMIC_TS_LORA = False
 _C.MODEL.MTLORA.TS_LORA_NUM = 0
+_C.MODEL.MTLORA.TS_ADAPTER = False
 
 # Convolution adaptation with depthwise separable adapters
 _C.MODEL.CONV_ADAPTER = CN()

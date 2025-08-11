@@ -231,6 +231,7 @@ class MTLoRALinear(LoRALayer):
         trainable_scale_shared=False,
         trainable_scale_per_task=False,
         shared_mode: str = 'matrix',
+        use_adapter: bool = False,
         **kwargs,
     ):
         assert shared_mode in ['matrix', 'matrixv2',
@@ -254,18 +255,25 @@ class MTLoRALinear(LoRALayer):
 
         self.tasks = tasks
         self.shared_mode = shared_mode
+        self.use_adapter = use_adapter
         if r['shared'] > 0:
             if has_tasks:
-                self.lora_tasks_A = nn.ParameterDict({
-                    task: nn.Parameter(
-                        self.linear.weight.new_zeros((r[task], in_features)))
-                    for task in tasks
-                })
-                self.lora_tasks_B = nn.ParameterDict({
-                    task: nn.Parameter(
-                        self.linear.weight.new_zeros((out_features, r[task])))
-                    for task in tasks
-                })
+                if self.use_adapter:
+                    self.lora_tasks_adapter = nn.ModuleDict({
+                        task: HoulsbyAdapter(out_features, r[task])
+                        for task in tasks
+                    })
+                else:
+                    self.lora_tasks_A = nn.ParameterDict({
+                        task: nn.Parameter(
+                            self.linear.weight.new_zeros((r[task], in_features)))
+                        for task in tasks
+                    })
+                    self.lora_tasks_B = nn.ParameterDict({
+                        task: nn.Parameter(
+                            self.linear.weight.new_zeros((out_features, r[task])))
+                        for task in tasks
+                    })
                 if trainable_scale_per_task:
                     self.lora_task_scale = nn.ParameterDict({
                         task: nn.Parameter(torch.FloatTensor(
@@ -304,6 +312,9 @@ class MTLoRALinear(LoRALayer):
                 nn.init.kaiming_uniform_(
                     self.lora_tasks_A[task], a=math.sqrt(5))
                 nn.init.zeros_(self.lora_tasks_B[task])
+        if hasattr(self, "lora_tasks_adapter"):
+            for adapter in self.lora_tasks_adapter.values():
+                adapter.reset_parameters()
 
     def merge(self):
         """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
@@ -318,25 +329,58 @@ class MTLoRALinear(LoRALayer):
         if self.shared_mode == 'matrix':
             lora = (x @ self.lora_shared_A.transpose(0, 1)
                     @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
-            lora_tasks = {
-                task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                for task in self.tasks
-            } if self.tasks is not None else None
+            if self.tasks is not None:
+                if self.use_adapter:
+                    lora_tasks = {
+                        task: pretrained + self.lora_tasks_adapter[task](
+                            pretrained if x_tasks is None else self.linear(x_tasks[task])
+                        ) * self.lora_task_scale[task]
+                        for task in self.tasks
+                    }
+                else:
+                    lora_tasks = {
+                        task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
+                            0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
+                        for task in self.tasks
+                    }
+            else:
+                lora_tasks = None
         elif self.shared_mode == 'matrixv2':
             lora = (x @ self.lora_shared_A.transpose(0, 1)
                     @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
-            lora_tasks = {
-                task: pretrained + lora + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                for task in self.tasks
-            } if self.tasks is not None else None
+            if self.tasks is not None:
+                if self.use_adapter:
+                    lora_tasks = {
+                        task: pretrained + lora + self.lora_tasks_adapter[task](
+                            pretrained if x_tasks is None else self.linear(x_tasks[task])
+                        ) * self.lora_task_scale[task]
+                        for task in self.tasks
+                    }
+                else:
+                    lora_tasks = {
+                        task: pretrained + lora + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
+                            0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
+                        for task in self.tasks
+                    }
+            else:
+                lora_tasks = None
         elif self.shared_mode == 'addition':
-            lora_tasks = {
-                task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                for task in self.tasks
-            } if self.tasks is not None else None
+            if self.tasks is not None:
+                if self.use_adapter:
+                    lora_tasks = {
+                        task: pretrained + self.lora_tasks_adapter[task](
+                            pretrained if x_tasks is None else self.linear(x_tasks[task])
+                        ) * self.lora_task_scale[task]
+                        for task in self.tasks
+                    }
+                else:
+                    lora_tasks = {
+                        task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
+                            0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
+                        for task in self.tasks
+                    }
+            else:
+                lora_tasks = None
             lora = self.lora_norm(torch.sum(torch.stack(
                 list(lora_tasks.values()), dim=0), dim=0))
         if hasattr(self, 'ts_lora'):
@@ -345,6 +389,28 @@ class MTLoRALinear(LoRALayer):
 
         return pretrained + lora, lora_tasks
 
+class HoulsbyAdapter(nn.Module):
+    """Houlsby-style adapter consisting of a bottleneck MLP with residual."""
+
+    def __init__(self, dim: int, bottleneck: int) -> None:
+        super().__init__()
+        self.down = nn.Linear(dim, bottleneck)
+        self.act = nn.ReLU()
+        self.up = nn.Linear(bottleneck, dim)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.down.weight, a=math.sqrt(5))
+        if self.down.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.down.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.down.bias, -bound, bound)
+        nn.init.zeros_(self.up.weight)
+        if self.up.bias is not None:
+            nn.init.zeros_(self.up.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.up(self.act(self.down(x)))
 
 class MTLoRAQKV(LoRALayer):
     def __init__(
@@ -361,6 +427,7 @@ class MTLoRAQKV(LoRALayer):
         trainable_scale_shared=False,
         trainable_scale_per_task=False,
         shared_mode: str = 'matrix',
+        use_adapter: bool = False,
         **kwargs,
     ):
         if isinstance(r, int):
@@ -368,11 +435,11 @@ class MTLoRAQKV(LoRALayer):
         super().__init__(r=r, lora_alpha=lora_shared_scale, lora_dropout=lora_dropout)
         self.tasks = tasks
         self.q = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
+                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, use_adapter=use_adapter, **kwargs)
         self.k = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
+                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, use_adapter=use_adapter, **kwargs)
         self.v = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
+                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, use_adapter=use_adapter, **kwargs)
 
     def reset_parameters(self):
         self.q.reset_parameters()
