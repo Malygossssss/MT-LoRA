@@ -702,7 +702,7 @@ def freeze_task_agnostic_lora(model: nn.Module) -> None:
     for name, param in model.named_parameters():
         if 'lora_shared_' in name or 'lora_shared_scale' in name:
             param.requires_grad = False
-            
+
 def replace_ts_lora_with_dynamic(model: nn.Module, num_ts_lora: int, alpha: float = 1.0) -> None:
     """Replace task specific LoRA weights with :class:`DynamicInputTSLoRAModule`.
 
