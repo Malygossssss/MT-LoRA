@@ -150,17 +150,36 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger,
                 logger.warning(k)
     max_accuracy = 0.0
     if not config.EVAL_MODE and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint and not skip_decoder:
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-        config.defrost()
-        config.TRAIN.START_EPOCH = checkpoint['epoch'] + 1
-        config.freeze()
-        if 'scaler' in checkpoint:
-            loss_scaler.load_state_dict(checkpoint['scaler'])
-        logger.info(
-            f"=> loaded successfully '{resume_path}' (epoch {checkpoint['epoch']})")
-        if 'max_accuracy' in checkpoint:
-            max_accuracy = checkpoint['max_accuracy']
+        ckpt_opt = checkpoint["optimizer"]
+
+        def _param_groups_match(opt, ckpt_state):
+            ckpt_groups = ckpt_state.get("param_groups", [])
+            if len(ckpt_groups) != len(opt.param_groups):
+                return False
+            for ckpt_g, opt_g in zip(ckpt_groups, opt.param_groups):
+                if len(ckpt_g.get("params", [])) != len(opt_g.get("params", [])):
+                    return False
+            return True
+
+        if _param_groups_match(optimizer, ckpt_opt):
+            try:
+                optimizer.load_state_dict(ckpt_opt)
+                lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+                config.defrost()
+                config.TRAIN.START_EPOCH = checkpoint['epoch'] + 1
+                config.freeze()
+                if 'scaler' in checkpoint:
+                    loss_scaler.load_state_dict(checkpoint['scaler'])
+                logger.info(
+                    f"=> loaded successfully '{resume_path}' (epoch {checkpoint['epoch']})")
+                if 'max_accuracy' in checkpoint:
+                    max_accuracy = checkpoint['max_accuracy']
+            except ValueError as e:
+                logger.warning(
+                    f"Failed to load optimizer state due to mismatch: {e}. Skipping optimizer and scheduler state.")
+        else:
+            logger.warning(
+                "Optimizer param groups in checkpoint do not match current model. Skipping optimizer and scheduler state.")
 
     del checkpoint
     torch.cuda.empty_cache()
