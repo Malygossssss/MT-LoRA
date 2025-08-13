@@ -287,10 +287,13 @@ class MTLoRALinear(LoRALayer):
                 assert has_tasks
                 self.lora_norm = nn.LayerNorm(out_features)
             elif self.shared_mode == 'matrix' or self.shared_mode == 'matrixv2':
-                self.lora_shared_A = nn.Parameter(
-                    self.linear.weight.new_zeros((r['shared'], in_features)))
-                self.lora_shared_B = nn.Parameter(
-                    self.linear.weight.new_zeros((out_features, r['shared'])))
+                if self.use_adapter:
+                    self.lora_shared_adapter = HoulsbyAdapter(out_features, r['shared'])
+                else:
+                    self.lora_shared_A = nn.Parameter(
+                        self.linear.weight.new_zeros((r['shared'], in_features)))
+                    self.lora_shared_B = nn.Parameter(
+                        self.linear.weight.new_zeros((out_features, r['shared'])))
             else:
                 raise NotImplementedError
             if trainable_scale_shared:
@@ -315,6 +318,8 @@ class MTLoRALinear(LoRALayer):
         if hasattr(self, "lora_tasks_adapter"):
             for adapter in self.lora_tasks_adapter.values():
                 adapter.reset_parameters()
+        if hasattr(self, "lora_shared_adapter"):
+            self.lora_shared_adapter.reset_parameters()
 
     def merge(self):
         """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
@@ -327,10 +332,9 @@ class MTLoRALinear(LoRALayer):
             return pretrained, None
         x = self.lora_dropout(x)
         if self.shared_mode == 'matrix':
-            lora = (x @ self.lora_shared_A.transpose(0, 1)
-                    @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
-            if self.tasks is not None:
-                if self.use_adapter:
+            if self.use_adapter:
+                lora = self.lora_shared_adapter(pretrained) * self.lora_shared_scale
+                if self.tasks is not None:
                     lora_tasks = {
                         task: pretrained + self.lora_tasks_adapter[task](
                             pretrained if x_tasks is None else self.linear(x_tasks[task])
@@ -338,18 +342,22 @@ class MTLoRALinear(LoRALayer):
                         for task in self.tasks
                     }
                 else:
+                    lora_tasks = None
+            else:
+                lora = (x @ self.lora_shared_A.transpose(0, 1)
+                        @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+                if self.tasks is not None:
                     lora_tasks = {
                         task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
                             0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
                         for task in self.tasks
                     }
-            else:
-                lora_tasks = None
+                else:
+                    lora_tasks = None
         elif self.shared_mode == 'matrixv2':
-            lora = (x @ self.lora_shared_A.transpose(0, 1)
-                    @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
-            if self.tasks is not None:
-                if self.use_adapter:
+            if self.use_adapter:
+                lora = self.lora_shared_adapter(pretrained) * self.lora_shared_scale
+                if self.tasks is not None:
                     lora_tasks = {
                         task: pretrained + lora + self.lora_tasks_adapter[task](
                             pretrained if x_tasks is None else self.linear(x_tasks[task])
@@ -357,13 +365,18 @@ class MTLoRALinear(LoRALayer):
                         for task in self.tasks
                     }
                 else:
+                    lora_tasks = None
+            else:
+                lora = (x @ self.lora_shared_A.transpose(0, 1)
+                        @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+                if self.tasks is not None:
                     lora_tasks = {
                         task: pretrained + lora + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
                             0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
                         for task in self.tasks
                     }
-            else:
-                lora_tasks = None
+                else:
+                    lora_tasks = None
         elif self.shared_mode == 'addition':
             if self.tasks is not None:
                 if self.use_adapter:
