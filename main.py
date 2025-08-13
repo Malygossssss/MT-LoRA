@@ -45,6 +45,7 @@ from models.lora import (
     freeze_task_agnostic_lora,
     replace_ts_lora_with_dynamic,
 )
+from models.adalora import AdaLoRAScheduler
 
 try:
     import wandb
@@ -161,6 +162,12 @@ def main(config):
         replace_ts_lora_with_dynamic(model, config.MODEL.MTLORA.TS_LORA_NUM)
     if config.MTL:
         model = build_mtl_model(model, config)
+
+    adalora_cfg = getattr(config.MODEL.MTLORA, 'ADALORA', None)
+    if adalora_cfg and adalora_cfg.ENABLED:
+        model.adalora_scheduler = AdaLoRAScheduler(model, adalora_cfg)
+    else:
+        model.adalora_scheduler = None
 
     if getattr(config.MODEL.MTLORA, 'METASGD_MODE', False):
         init_meta_sgd_lrs(
@@ -524,6 +531,9 @@ def maml_train_one_epoch(
                 p.data.copy_(b)
 
         meta_loss = torch.stack(query_losses).mean()
+        if getattr(model, 'adalora_scheduler', None):
+            ortho = model.adalora_scheduler.orthogonal_regularization()
+            meta_loss = meta_loss + model.adalora_scheduler.ortho_reg_coeff * ortho
 
         grad_norm = loss_scaler(
             meta_loss,
@@ -534,6 +544,8 @@ def maml_train_one_epoch(
         )
 
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
+            if getattr(model, 'adalora_scheduler', None):
+                model.adalora_scheduler.step()
             optimizer.zero_grad()
             lr_scheduler.step_update(
                 (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
@@ -684,6 +696,9 @@ def taml_train_one_epoch(
                 p.data.copy_(b)
 
         meta_loss = torch.stack(query_losses).mean()
+        if getattr(model, 'adalora_scheduler', None):
+            ortho = model.adalora_scheduler.orthogonal_regularization()
+            meta_loss = meta_loss + model.adalora_scheduler.ortho_reg_coeff * ortho
 
         reg_loss = 0.0
         if lambda_reg != 0.0 and adapted_params:
@@ -706,6 +721,8 @@ def taml_train_one_epoch(
         )
 
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
+            if getattr(model, 'adalora_scheduler', None):
+                model.adalora_scheduler.step()
             optimizer.zero_grad()
             lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
 
@@ -862,6 +879,9 @@ def meta_sgd_train_one_epoch(
             loss_dict[task_name] = q_loss.detach()
 
         meta_loss = torch.stack(query_losses).mean()
+        if getattr(model, 'adalora_scheduler', None):
+            ortho = model.adalora_scheduler.orthogonal_regularization()
+            meta_loss = meta_loss + model.adalora_scheduler.ortho_reg_coeff * ortho
 
         grad_norm = loss_scaler(
             meta_loss,
@@ -872,6 +892,8 @@ def meta_sgd_train_one_epoch(
         )
 
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
+            if getattr(model, 'adalora_scheduler', None):
+                model.adalora_scheduler.step()
             optimizer.zero_grad()
             lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
 
@@ -1038,6 +1060,10 @@ def reptile_train_one_epoch(
         lr_scheduler.step_update(epoch * num_steps + idx)
 
         meta_loss = torch.stack(task_losses).mean()
+        if getattr(model, 'adalora_scheduler', None):
+            ortho = model.adalora_scheduler.orthogonal_regularization()
+            meta_loss = meta_loss + model.adalora_scheduler.ortho_reg_coeff * ortho
+            model.adalora_scheduler.step()
 
         loss_meter.update(meta_loss.item())
         batch_time.update(time.perf_counter() - end)
@@ -1104,6 +1130,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             outputs = model(samples)
             loss, loss_dict = criterion(outputs, targets)
+        if getattr(model, 'adalora_scheduler', None):
+            ortho = model.adalora_scheduler.orthogonal_regularization()
+            loss = loss + model.adalora_scheduler.ortho_reg_coeff * ortho
 
         is_second_order = hasattr(
             optimizer, 'is_second_order') and optimizer.is_second_order
@@ -1111,6 +1140,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                                 parameters=model.parameters(), create_graph=is_second_order,
                                 update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0)
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
+            if getattr(model, 'adalora_scheduler', None):
+                model.adalora_scheduler.step()
             optimizer.zero_grad()
             lr_scheduler.step_update(
                 (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)

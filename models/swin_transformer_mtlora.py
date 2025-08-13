@@ -10,6 +10,7 @@ from torch import Tensor
 import torch.nn as nn
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from models.lora import MTLoRALinear
+from models.adalora import AdaLoRALinear
 
 try:
     import os
@@ -39,19 +40,20 @@ class Mlp(nn.Module):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
 
+        linear_cls = AdaLoRALinear if getattr(mtlora, 'ADALORA', None) and mtlora.ADALORA.ENABLED else MTLoRALinear
         if mtlora.FC1_ENABLED:
-            self.fc1 = MTLoRALinear(in_features, hidden_features, r=mtlora.R_PER_TASK_LIST[layer_idx],
-                                    lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
-                                        tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
-                                    trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
+            self.fc1 = linear_cls(in_features, hidden_features, r=mtlora.R_PER_TASK_LIST[layer_idx],
+                                  lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
+                    tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
+                                  trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
         else:
             self.fc1 = CompatLinear(in_features, hidden_features)
         self.act = act_layer()
         if mtlora.FC2_ENABLED:
-            self.fc2 = MTLoRALinear(hidden_features, out_features, r=mtlora.R_PER_TASK_LIST[layer_idx],
-                                    lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
-                                        tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
-                                    trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
+            self.fc2 = linear_cls(hidden_features, out_features, r=mtlora.R_PER_TASK_LIST[layer_idx],
+                                  lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
+                    tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
+                                  trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
         else:
             self.fc2 = CompatLinear(hidden_features, out_features)
         self.tasks = tasks
@@ -152,8 +154,9 @@ class WindowAttention(nn.Module):
         self.register_buffer("relative_position_index",
                              relative_position_index)
 
+        linear_cls = AdaLoRALinear if getattr(mtlora, 'ADALORA', None) and mtlora.ADALORA.ENABLED else MTLoRALinear
         if mtlora.QKV_ENABLED:
-            self.qkv = MTLoRALinear(dim, dim * 3, r=mtlora.R_PER_TASK_LIST[layer_idx],
+            self.qkv = linear_cls(dim, dim * 3, r=mtlora.R_PER_TASK_LIST[layer_idx],
                                     lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=None, bias=qkv_bias,
                                     trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
         else:
@@ -161,7 +164,7 @@ class WindowAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
 
         if mtlora.PROJ_ENABLED:
-            self.proj = MTLoRALinear(dim, dim, r=mtlora.R_PER_TASK_LIST[layer_idx],
+            self.proj = linear_cls(dim, dim, r=mtlora.R_PER_TASK_LIST[layer_idx],
                                      lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
                 tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
                 trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
@@ -429,8 +432,9 @@ class PatchMerging(nn.Module):
         super().__init__()
         self.input_resolution = input_resolution
         self.dim = dim
+        linear_cls = AdaLoRALinear if getattr(mtlora, 'ADALORA', None) and mtlora.ADALORA.ENABLED else MTLoRALinear
         if mtlora.DOWNSAMPLER_ENABLED:
-            self.reduction = MTLoRALinear(4 * dim, 2 * dim, r=mtlora.R_PER_TASK_LIST[layer_idx],
+            self.reduction = linear_cls(4 * dim, 2 * dim, r=mtlora.R_PER_TASK_LIST[layer_idx],
                                           lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=None, bias=False,
                                           trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
         else:
