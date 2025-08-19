@@ -55,16 +55,16 @@ class AdaLoRALinear(nn.Module):
                 self.lora_tasks_P = nn.ParameterDict()
                 self.lora_tasks_Q = nn.ParameterDict()
                 self.lora_tasks_L = nn.ParameterDict()
-                self.lora_tasks_mask = {}
+                # use ParameterDict so masks move with module.to(device)
+                self.lora_tasks_mask = nn.ParameterDict()
                 self.lora_task_scale = {}
                 for t in tasks:
                     r_t = r[t]
                     self.lora_tasks_P[t] = nn.Parameter(torch.empty(out_features, r_t))
                     self.lora_tasks_Q[t] = nn.Parameter(torch.empty(r_t, in_features))
                     self.lora_tasks_L[t] = nn.Parameter(torch.ones(r_t))
-                    mask = torch.ones(r_t)
-                    self.register_buffer(f'lora_tasks_mask_{t}', mask)
-                    self.lora_tasks_mask[t] = mask
+                    # masks should reside on same device as module, hence keep as Parameters
+                    self.lora_tasks_mask[t] = nn.Parameter(torch.ones(r_t), requires_grad=False)
                     if trainable_scale_per_task:
                         self.lora_task_scale[t] = nn.Parameter(torch.tensor(lora_task_scale[t]))
                     else:
@@ -97,7 +97,8 @@ class AdaLoRALinear(nn.Module):
         lam = self.get_lambda(task)
         mask = self.get_mask(task)
         lam.data[indices] = 0
-        mask[indices] = 0
+        # ensure masks reside on correct device and avoid autograd tracking
+        mask.data[indices] = 0
 
     def active_rank(self, task: Optional[str] = None) -> int:
         return int(self.get_mask(task).sum().item())

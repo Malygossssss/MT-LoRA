@@ -43,7 +43,7 @@ MODEL:
       SCHEDULE_STEP: 100
       SCHEDULE_MODE: linear
       IMPORTANCE: lambda_grad
-      MODE: ta
+      MODE: ts
   DECODER_HEAD:
     semseg: hrnet
     normals: hrnet
