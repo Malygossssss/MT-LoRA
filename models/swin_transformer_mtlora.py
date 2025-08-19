@@ -1,8 +1,16 @@
 # --------------------------------------------------------
-# Swin Transformer
+# MTLoRA
+# GitHub: https://github.com/scale-lab/MTLoRA
+# Built upon Swin Transformer (https://github.com/microsoft/Swin-Transformer)
+#
+# Original file:
 # Copyright (c) 2021 Microsoft
-# Licensed under The MIT License [see LICENSE for details]
+# Licensed under the MIT License
 # Written by Ze Liu
+#
+# Modifications:
+# Copyright (c) 2024 SCALE Lab, Brown University
+# Licensed under the MIT License (see LICENSE for details)
 # --------------------------------------------------------
 
 import torch
@@ -10,7 +18,6 @@ from torch import Tensor
 import torch.nn as nn
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from models.lora import MTLoRALinear
-from models.adalora import AdaLoRALinear
 
 try:
     import os
@@ -40,20 +47,19 @@ class Mlp(nn.Module):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
 
-        linear_cls = AdaLoRALinear if getattr(mtlora, 'ADALORA', None) and mtlora.ADALORA.ENABLED else MTLoRALinear
         if mtlora.FC1_ENABLED:
-            self.fc1 = linear_cls(in_features, hidden_features, r=mtlora.R_PER_TASK_LIST[layer_idx],
-                                  lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
-                    tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
-                                  trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
+            self.fc1 = MTLoRALinear(in_features, hidden_features, r=mtlora.R_PER_TASK_LIST[layer_idx],
+                                    lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
+                                        tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
+                                    trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE)
         else:
             self.fc1 = CompatLinear(in_features, hidden_features)
         self.act = act_layer()
         if mtlora.FC2_ENABLED:
-            self.fc2 = linear_cls(hidden_features, out_features, r=mtlora.R_PER_TASK_LIST[layer_idx],
-                                  lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
-                    tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
-                                  trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
+            self.fc2 = MTLoRALinear(hidden_features, out_features, r=mtlora.R_PER_TASK_LIST[layer_idx],
+                                    lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
+                                        tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
+                                    trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE)
         else:
             self.fc2 = CompatLinear(hidden_features, out_features)
         self.tasks = tasks
@@ -135,7 +141,8 @@ class WindowAttention(nn.Module):
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
-            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads))  # 2*Wh-1 * 2*Ww-1, nH
+            # 2*Wh-1 * 2*Ww-1, nH
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads))
 
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(self.window_size[0])
@@ -154,20 +161,19 @@ class WindowAttention(nn.Module):
         self.register_buffer("relative_position_index",
                              relative_position_index)
 
-        linear_cls = AdaLoRALinear if getattr(mtlora, 'ADALORA', None) and mtlora.ADALORA.ENABLED else MTLoRALinear
         if mtlora.QKV_ENABLED:
-            self.qkv = linear_cls(dim, dim * 3, r=mtlora.R_PER_TASK_LIST[layer_idx],
+            self.qkv = MTLoRALinear(dim, dim * 3, r=mtlora.R_PER_TASK_LIST[layer_idx],
                                     lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=None, bias=qkv_bias,
-                                    trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
+                                    trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE)
         else:
             self.qkv = CompatLinear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
 
         if mtlora.PROJ_ENABLED:
-            self.proj = linear_cls(dim, dim, r=mtlora.R_PER_TASK_LIST[layer_idx],
+            self.proj = MTLoRALinear(dim, dim, r=mtlora.R_PER_TASK_LIST[layer_idx],
                                      lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=(
                 tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
-                trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
+                trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE)
         else:
             self.proj = CompatLinear(dim, dim)
 
@@ -194,7 +200,8 @@ class WindowAttention(nn.Module):
         attn = (q @ k.transpose(-2, -1))
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
+            # Wh*Ww,Wh*Ww,nH
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)
         relative_position_bias = relative_position_bias.permute(
             2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
         attn = attn + relative_position_bias.unsqueeze(0)
@@ -402,7 +409,7 @@ class SwinTransformerBlock(nn.Module):
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
-               f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
+            f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
 
     def flops(self):
         flops = 0
@@ -432,11 +439,10 @@ class PatchMerging(nn.Module):
         super().__init__()
         self.input_resolution = input_resolution
         self.dim = dim
-        linear_cls = AdaLoRALinear if getattr(mtlora, 'ADALORA', None) and mtlora.ADALORA.ENABLED else MTLoRALinear
         if mtlora.DOWNSAMPLER_ENABLED:
-            self.reduction = linear_cls(4 * dim, 2 * dim, r=mtlora.R_PER_TASK_LIST[layer_idx],
+            self.reduction = MTLoRALinear(4 * dim, 2 * dim, r=mtlora.R_PER_TASK_LIST[layer_idx],
                                           lora_shared_scale=mtlora.SHARED_SCALE[layer_idx], lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx], lora_dropout=mtlora.DROPOUT[layer_idx], tasks=None, bias=False,
-                                          trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE, use_adapter=mtlora.TS_ADAPTER)
+                                          trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED, trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK, shared_mode=mtlora.SHARED_MODE)
         else:
             self.reduction = CompatLinear(4 * dim, 2 * dim, bias=False)
 
@@ -675,7 +681,8 @@ class SwinTransformerMTLoRA(nn.Module):
 
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate,
-                                                sum(depths))]  # stochastic depth decay rule
+                                                # stochastic depth decay rule
+                                                sum(depths))]
 
         # build layers
         self.layers = nn.ModuleList()

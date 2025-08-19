@@ -1,8 +1,16 @@
 # --------------------------------------------------------
-# Swin Transformer
+# MTLoRA
+# GitHub: https://github.com/scale-lab/MTLoRA
+# Built upon Swin Transformer (https://github.com/microsoft/Swin-Transformer)
+#
+# Original file:
 # Copyright (c) 2021 Microsoft
-# Licensed under The MIT License [see LICENSE for details]
+# Licensed under the MIT License
 # Written by Ze Liu
+#
+# Modifications:
+# Copyright (c) 2024 SCALE Lab, Brown University
+# Licensed under the MIT License (see LICENSE for details)
 # --------------------------------------------------------
 
 import os
@@ -17,10 +25,6 @@ import matplotlib.pyplot as plt
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
-from torch.nn import Module
-from torch.nn.utils.stateless import functional_call
-from collections import OrderedDict
-from typing import Sequence
 
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import accuracy, AverageMeter
@@ -30,22 +34,13 @@ from models import build_model, build_mtl_model
 from data import build_loader
 from lr_scheduler import build_scheduler
 from optimizer import build_optimizer
-from logger import create_logger, create_eval_logger
+from logger import create_logger
 from utils import load_checkpoint, load_pretrained, save_checkpoint, NativeScalerWithGradNormCount, auto_resume_helper
 
 from mtl_loss_schemes import MultiTaskLoss, get_loss
 from evaluation.evaluate_utils import PerformanceMeter, get_output
 from ptflops import get_model_complexity_info
-# from models.lora import mark_only_lora_as_trainable
-from models.lora import (
-    mark_only_lora_as_trainable,
-    consolidate_task_lora_to_shared,
-    print_lora_layer_summary,
-    freeze_task_specific_lora,
-    freeze_task_agnostic_lora,
-    replace_ts_lora_with_dynamic,
-)
-from models.adalora import AdaLoRAScheduler
+from models.lora import mark_only_lora_as_trainable
 
 try:
     import wandb
@@ -154,28 +149,11 @@ def main(config):
     dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(
         config)
 
-    # os.environ['CUDA_VISIBLE_DEVICES'] = '6'
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     teacher = None
     model = build_model(config)
-    if config.MODEL.MTLORA.ENABLED and getattr(config.MODEL.MTLORA, 'DYNAMIC_TS_LORA', False):
-        replace_ts_lora_with_dynamic(model, config.MODEL.MTLORA.TS_LORA_NUM)
     if config.MTL:
         model = build_mtl_model(model, config)
-
-    adalora_cfg = getattr(config.MODEL.MTLORA, 'ADALORA', None)
-    if adalora_cfg and adalora_cfg.ENABLED:
-        model.adalora_scheduler = AdaLoRAScheduler(model, adalora_cfg)
-    else:
-        model.adalora_scheduler = None
-
-    if getattr(config.MODEL.MTLORA, 'METASGD_MODE', False):
-        init_meta_sgd_lrs(
-            model,
-            config.MODEL.MTLORA.METASGD_INIT,
-            config.TASKS,
-            freeze_ts=config.MODEL.MTLORA.FREEZE_TS_LORA,
-            freeze_ta=config.MODEL.MTLORA.FREEZE_TA_LORA)
 
     n_parameters = sum(p.numel() for p in model.parameters())
     logger.info(f"number of params: {n_parameters / 1e6} M")
@@ -282,10 +260,6 @@ def main(config):
                                         freeze_norm=config.TRAIN.FREEZE_LAYER_NORM,
                                         free_relative_bias=config.TRAIN.FREEZE_RELATIVE_POSITION_BIAS,
                                         freeze_downsample_reduction=True if config.MODEL.MTLORA.DOWNSAMPLER_ENABLED else config.TRAIN.FREEZE_DOWNSAMPLE_REDUCTION)
-            if config.MODEL.MTLORA.FREEZE_TS_LORA:
-                freeze_task_specific_lora(model.backbone)
-            if config.MODEL.MTLORA.FREEZE_TA_LORA:
-                freeze_task_agnostic_lora(model.backbone)
         else:
             print("Marking all layers as trainable")
     if config.MODEL.FREEZE_BACKBONE:
@@ -309,27 +283,7 @@ Extra params:                {(trainable_params - (lora_params + decoder_params)
 Total params:               {total_model_params:,} (trainable ratio: {trainable_params/total_model_params * 100:2.2f}%)
 Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio: {trainable_params/total_model_params_without_lora * 100:2.2f}%)
 """)
-    # print_lora_layer_summary(model)
     logger.info("Start training")
-    # for name, param in model.named_parameters():
-    #     if 'lora_shared_' in name:
-    #         print(name)
-    if getattr(config, 'RL', None) and config.RL.ENABLED:
-        train_with_rl(
-            config,
-            model,
-            criterion,
-            data_loader_train,
-            data_loader_val,
-            optimizer,
-            lr_scheduler,
-            loss_scaler,
-            mixup_fn,
-            logger,
-            teacher,
-        )
-        return
-
     start_time = time.perf_counter()
 
     epoch = 0
@@ -337,37 +291,8 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
         if not config.MTL:
             data_loader_train.sampler.set_epoch(epoch)
 
-        #⭐Meta-learning logic
-        if getattr(config.MODEL.MTLORA, 'REPTILE_MODE', False):
-            print("--------------------REPTILE---------------------")
-            reptile_train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher
-            )
-        elif getattr(config.MODEL.MTLORA, 'METASGD_MODE', False):
-            print("--------------------Meta-SGD---------------------")
-            meta_sgd_train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher
-            )
-        elif getattr(config.MODEL.MTLORA, 'TAML_MODE', False):
-            print("--------------------TAML---------------------")
-            taml_train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher
-            )
-        elif config.MODEL.MTLORA.MAML_MODE:
-            print("--------------------MAML---------------------")
-            maml_train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher
-            )
-        else:
-            print("--------------------MT-LORA---------------------")
-            train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher)
-
+        train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
+                        loss_scaler, teacher=teacher)
         if dist.get_rank() == 0 and (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
             save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, loss_scaler,
                             logger)
@@ -384,718 +309,6 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
 
-class _TaskWrapper(Module):
-    """Simple wrapper to expose ``forward_task`` as ``forward`` for functional_call."""
-
-    def __init__(self, model: Module, task: str):
-        super().__init__()
-        self.model = model
-        self.task = task
-
-    def forward(self, x):
-        return self.model.forward_task(x, self.task)[self.task]
-
-
-def init_meta_sgd_lrs(
-        model: Module,
-        init_lr: float,
-        tasks: Sequence[str],
-        freeze_ts: bool = False,
-        freeze_ta: bool = False) -> None:
-    """Attach grouped learnable inner-loop lrs to ``model`` for Meta-SGD.
-
-    A single lr is shared across all parameters of ``lora_shared_`` and one lr
-    per task is used for all ``lora_tasks_`` parameters belonging to that task.
-    """
-
-    # build mapping from task name to meta-lr index
-    group_map = {'shared': 0}
-    for i, t in enumerate(tasks, start=1):
-        group_map[t] = i
-
-    model.meta_sgd_lrs = torch.nn.ParameterList(
-        [torch.nn.Parameter(torch.tensor(init_lr)) for _ in range(len(group_map))]
-    )
-    lr_map = {}
-    for n, _ in model.named_parameters():
-        if 'lora_shared_' in n and not freeze_ta:
-            lr_map[f"model.{n}"] = group_map['shared']
-        elif not freeze_ts and 'lora_tasks_' in n:
-            task_name = n.split('.')[-1]
-            if task_name in group_map:
-                lr_map[f"model.{n}"] = group_map[task_name]
-
-    model.meta_sgd_lr_map = lr_map
-
-def maml_train_one_epoch(
-        config,
-        model,
-        criterion,
-        data_loader,
-        optimizer,
-        epoch,
-        mixup_fn,
-        lr_scheduler,
-        loss_scaler,
-        task=None,
-        teacher=None):
-    """Train one epoch using a per-task MAML update.
-
-    After computing the meta loss over all tasks, gradients are applied to
-    **all** LoRA weights (both shared and task specific).
-    """
-
-    model.train()
-    optimizer.zero_grad()
-
-    num_steps = len(data_loader)
-    batch_time = AverageMeter()
-    loss_meter = AverageMeter()
-    norm_meter = AverageMeter()
-    scaler_meter = AverageMeter()
-
-    start = time.perf_counter()
-    end = time.perf_counter()
-    loss_dict = None
-
-    for idx, batch in enumerate(data_loader):
-        samples = batch['image'].cuda(non_blocking=True)
-        targets = {
-            t: batch[t].cuda(non_blocking=True) for t in config.TASKS
-        }
-
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
-
-        batch_size = samples.size(0)
-        support_size = batch_size // 2
-        support_samples = samples[:support_size]
-        query_samples = samples[support_size:]
-
-        for p in model.parameters():
-            p.requires_grad = False
-
-        lora_params = [
-            p for n, p in model.named_parameters()
-            if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
-                    not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n
-            )
-        ]
-        for p in lora_params:
-            p.requires_grad = True
-
-        query_losses = []
-        loss_dict = {}
-
-        for task_name in config.TASKS:
-            task_params = [
-                p for n, p in model.named_parameters()
-                if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
-                        not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n and f'.{task_name}' in n
-                )
-            ]
-            backup = [p.detach().clone() for p in task_params]
-
-            starget = targets[task_name][:support_size]
-            qtarget = targets[task_name][support_size:]
-
-            inner_steps = max(1, config.MODEL.MTLORA.MAML_INNER_STEPS)
-            for _ in range(inner_steps):
-                with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                    sout = model.forward_task(support_samples, task_name)[task_name]
-                    s_loss = criterion.loss_ft[task_name](sout, starget)
-                    s_loss = criterion.loss_weights[task_name] * s_loss
-
-                grads = torch.autograd.grad(
-                    s_loss,
-                    task_params,
-                    allow_unused=True,
-                    create_graph=False,
-                )
-                # replace missing grads with zeros to avoid runtime errors
-                grads = [torch.zeros_like(p) if g is None else g
-                         for p, g in zip(task_params, grads)]
-                inner_lr = config.MODEL.MTLORA.MAML_INNER_LR
-                for p, g in zip(task_params, grads):
-                    p.data = p.data - inner_lr * g
-
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                qout = model.forward_task(query_samples, task_name)[task_name]
-                q_loss = criterion.loss_ft[task_name](qout, qtarget)
-                q_loss = criterion.loss_weights[task_name] * q_loss
-
-            query_losses.append(q_loss)
-            loss_dict[task_name] = q_loss.detach()
-
-            for p, b in zip(task_params, backup):
-                p.data.copy_(b)
-
-        meta_loss = torch.stack(query_losses).mean()
-        if getattr(model, 'adalora_scheduler', None):
-            ortho = model.adalora_scheduler.orthogonal_regularization()
-            meta_loss = meta_loss + model.adalora_scheduler.ortho_reg_coeff * ortho
-
-        grad_norm = loss_scaler(
-            meta_loss,
-            optimizer,
-            clip_grad=config.TRAIN.CLIP_GRAD,
-            parameters=lora_params,
-            update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0,
-        )
-
-        if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
-            if getattr(model, 'adalora_scheduler', None):
-                model.adalora_scheduler.step()
-            optimizer.zero_grad()
-            lr_scheduler.step_update(
-                (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
-
-        loss_scale_value = loss_scaler.state_dict()["scale"]
-
-        loss_meter.update(meta_loss.item())
-        if grad_norm is not None:
-            norm_meter.update(grad_norm)
-        scaler_meter.update(loss_scale_value)
-        batch_time.update(time.perf_counter() - end)
-        end = time.perf_counter()
-
-        if wandb_available:
-            metrics = {
-                "train/epoch_ndx": epoch,
-                "train/batch_ndx": idx,
-                "train/train_loss": loss_meter.val,
-                "train/train_loss_avg": loss_meter.avg,
-                "train/learning_rate": optimizer.param_groups[0]["lr"],
-                "train/weight_decay": optimizer.param_groups[0]['weight_decay'],
-                "train/time": batch_time.val,
-                "train/time_avg": batch_time.avg,
-                "train/grad_norm": norm_meter.val,
-                "train/grad_norm_avg": norm_meter.avg,
-                "train/loss_scale": scaler_meter.val,
-                "train/loss_scale_avg": scaler_meter.avg,
-                "train/memory": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
-            }
-            wandb.log(metrics)
-
-        if idx % config.PRINT_FREQ == 0:
-            lr = optimizer.param_groups[0]['lr']
-            wd = optimizer.param_groups[0]['weight_decay']
-            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-            etas = batch_time.avg * (num_steps - idx)
-            logger.info(
-                f'MAML Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
-                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
-                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
-                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
-                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
-                f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
-                f'mem {memory_used:.0f}MB')
-
-    epoch_time = time.perf_counter() - start
-    logger.info(
-        f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
-
-def taml_train_one_epoch(
-        config,
-        model,
-        criterion,
-        data_loader,
-        optimizer,
-        epoch,
-        mixup_fn,
-        lr_scheduler,
-        loss_scaler,
-        task=None,
-        teacher=None):
-    """Train one epoch using MAML with task-agnostic regularization."""
-
-    model.train()
-    optimizer.zero_grad()
-
-    num_steps = len(data_loader)
-    batch_time = AverageMeter()
-    loss_meter = AverageMeter()
-    norm_meter = AverageMeter()
-    scaler_meter = AverageMeter()
-
-    start = time.perf_counter()
-    end = time.perf_counter()
-    loss_dict = None
-
-    lambda_reg = getattr(config.MODEL.MTLORA, 'TAML_LAMBDA', 0.0)
-
-    for idx, batch in enumerate(data_loader):
-        samples = batch['image'].cuda(non_blocking=True)
-        targets = {t: batch[t].cuda(non_blocking=True) for t in config.TASKS}
-
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
-
-        batch_size = samples.size(0)
-        support_size = batch_size // 2
-        support_samples = samples[:support_size]
-        query_samples = samples[support_size:]
-
-        for p in model.parameters():
-            p.requires_grad = False
-
-        lora_params = [
-            p for n, p in model.named_parameters()
-            if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
-                    not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n
-            )
-        ]
-        for p in lora_params:
-            p.requires_grad = True
-
-        query_losses = []
-        adapted_params = []
-        loss_dict = {}
-
-        for task_name in config.TASKS:
-            task_params = [
-                p for n, p in model.named_parameters()
-                if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
-                        not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n and f'.{task_name}' in n
-                )
-            ]
-            backup = [p.detach().clone() for p in task_params]
-
-            starget = targets[task_name][:support_size]
-            qtarget = targets[task_name][support_size:]
-
-            inner_steps = max(1, config.MODEL.MTLORA.MAML_INNER_STEPS)
-            for _ in range(inner_steps):
-                with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                    sout = model.forward_task(support_samples, task_name)[task_name]
-                    s_loss = criterion.loss_ft[task_name](sout, starget)
-                    s_loss = criterion.loss_weights[task_name] * s_loss
-
-                grads = torch.autograd.grad(
-                    s_loss,
-                    task_params,
-                    allow_unused=True,
-                    create_graph=False,
-                )
-                grads = [torch.zeros_like(p) if g is None else g for p, g in zip(task_params, grads)]
-                inner_lr = config.MODEL.MTLORA.MAML_INNER_LR
-                for p, g in zip(task_params, grads):
-                    p.data = p.data - inner_lr * g
-
-            adapted_params.append([p.detach().clone() for p in task_params])
-
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                qout = model.forward_task(query_samples, task_name)[task_name]
-                q_loss = criterion.loss_ft[task_name](qout, qtarget)
-                q_loss = criterion.loss_weights[task_name] * q_loss
-
-            query_losses.append(q_loss)
-            loss_dict[task_name] = q_loss.detach()
-
-            for p, b in zip(task_params, backup):
-                p.data.copy_(b)
-
-        meta_loss = torch.stack(query_losses).mean()
-        if getattr(model, 'adalora_scheduler', None):
-            ortho = model.adalora_scheduler.orthogonal_regularization()
-            meta_loss = meta_loss + model.adalora_scheduler.ortho_reg_coeff * ortho
-
-        reg_loss = 0.0
-        if lambda_reg != 0.0 and adapted_params:
-            param_means = [torch.stack([ap[i] for ap in adapted_params]).mean(0) for i in range(len(adapted_params[0]))]
-            for ap in adapted_params:
-                for p, m in zip(ap, param_means):
-                    reg_loss = reg_loss + torch.sum((p - m) ** 2)
-            reg_loss = reg_loss / len(adapted_params)
-            total_loss = meta_loss + lambda_reg * reg_loss
-        else:
-            reg_loss = torch.tensor(0.0, device=meta_loss.device)
-            total_loss = meta_loss
-
-        grad_norm = loss_scaler(
-            total_loss,
-            optimizer,
-            clip_grad=config.TRAIN.CLIP_GRAD,
-            parameters=lora_params,
-            update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0,
-        )
-
-        if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
-            if getattr(model, 'adalora_scheduler', None):
-                model.adalora_scheduler.step()
-            optimizer.zero_grad()
-            lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
-
-        loss_scale_value = loss_scaler.state_dict()["scale"]
-
-        loss_meter.update(total_loss.item())
-        if grad_norm is not None:
-            norm_meter.update(grad_norm)
-        scaler_meter.update(loss_scale_value)
-        batch_time.update(time.perf_counter() - end)
-        end = time.perf_counter()
-
-        if wandb_available:
-            metrics = {
-                "train/epoch_ndx": epoch,
-                "train/batch_ndx": idx,
-                "train/train_loss": loss_meter.val,
-                "train/train_loss_avg": loss_meter.avg,
-                "train/learning_rate": optimizer.param_groups[0]["lr"],
-                "train/weight_decay": optimizer.param_groups[0]['weight_decay'],
-                "train/time": batch_time.val,
-                "train/time_avg": batch_time.avg,
-                "train/grad_norm": norm_meter.val,
-                "train/grad_norm_avg": norm_meter.avg,
-                "train/loss_scale": scaler_meter.val,
-                "train/loss_scale_avg": scaler_meter.avg,
-                "train/memory": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
-            }
-            wandb.log(metrics)
-
-        if idx % config.PRINT_FREQ == 0:
-            lr = optimizer.param_groups[0]['lr']
-            wd = optimizer.param_groups[0]['weight_decay']
-            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-            etas = batch_time.avg * (num_steps - idx)
-            logger.info(
-                f'TAML Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
-                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
-                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
-                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
-                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
-                f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
-                f'mem {memory_used:.0f}MB')
-
-    epoch_time = time.perf_counter() - start
-    logger.info(
-        f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
-
-def meta_sgd_train_one_epoch(
-        config,
-        model,
-        criterion,
-        data_loader,
-        optimizer,
-        epoch,
-        mixup_fn,
-        lr_scheduler,
-        loss_scaler,
-        task=None,
-        teacher=None):
-    """Train one epoch using Meta-SGD with learnable per-parameter inner learning rates."""
-
-    model.train()
-    optimizer.zero_grad()
-
-    num_steps = len(data_loader)
-    batch_time = AverageMeter()
-    loss_meter = AverageMeter()
-    norm_meter = AverageMeter()
-    scaler_meter = AverageMeter()
-
-    lora_named = [
-        (n, p)
-        for n, p in model.named_parameters()
-        if ('lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
-                not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n)
-    ]
-    lora_names = [f"model.{n}" for n, _ in lora_named]
-    lora_params = [p for _, p in lora_named]
-
-    assert hasattr(model, 'meta_sgd_lrs'), 'call init_meta_sgd_lrs before training'
-    meta_lrs = model.meta_sgd_lrs
-    lr_map = model.meta_sgd_lr_map
-
-    start = time.perf_counter()
-    end = time.perf_counter()
-    loss_dict = None
-
-    for idx, batch in enumerate(data_loader):
-        samples = batch['image'].cuda(non_blocking=True)
-        targets = {t: batch[t].cuda(non_blocking=True) for t in config.TASKS}
-
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
-
-        batch_size = samples.size(0)
-        support_size = batch_size // 2
-        support_samples = samples[:support_size]
-        query_samples = samples[support_size:]
-
-        for p in model.parameters():
-            p.requires_grad = False
-        for p in lora_params:
-            p.requires_grad = True
-        for a in meta_lrs:
-            a.requires_grad = True
-
-        base_params = OrderedDict(
-            {
-                **{f"model.{k}": v for k, v in model.named_parameters()},
-                **{f"model.{k}": v for k, v in model.named_buffers()},
-            }
-        )
-
-        query_losses = []
-        loss_dict = {}
-
-        for task_name in config.TASKS:
-            idxs = [i for i, n in enumerate(lora_names) if (
-                    'lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA) or (
-                    not config.MODEL.MTLORA.FREEZE_TS_LORA and f'.{task_name}' in n)]
-            task_params = [lora_params[i] for i in idxs]
-            task_alphas = [meta_lrs[lr_map[lora_names[i]]] for i in idxs]
-            task_names = [lora_names[i] for i in idxs]
-
-            starget = targets[task_name][:support_size]
-            qtarget = targets[task_name][support_size:]
-
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                sout = model.forward_task(support_samples, task_name)[task_name]
-                s_loss = criterion.loss_ft[task_name](sout, starget)
-                s_loss = criterion.loss_weights[task_name] * s_loss
-
-            grads = torch.autograd.grad(
-                s_loss,
-                task_params,
-                allow_unused=True,
-                create_graph=True,
-            )
-            grads = [torch.zeros_like(p) if g is None else g for p, g in zip(task_params, grads)]
-
-            adapted = base_params.copy()
-            for name, p, g, a_lr in zip(task_names, task_params, grads, task_alphas):
-                adapted[name] = p - a_lr * g
-
-            task_model = _TaskWrapper(model, task_name)
-
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                qout = functional_call(task_model, adapted, (query_samples,))
-                q_loss = criterion.loss_ft[task_name](qout, qtarget)
-                q_loss = criterion.loss_weights[task_name] * q_loss
-
-            query_losses.append(q_loss)
-            loss_dict[task_name] = q_loss.detach()
-
-        meta_loss = torch.stack(query_losses).mean()
-        if getattr(model, 'adalora_scheduler', None):
-            ortho = model.adalora_scheduler.orthogonal_regularization()
-            meta_loss = meta_loss + model.adalora_scheduler.ortho_reg_coeff * ortho
-
-        grad_norm = loss_scaler(
-            meta_loss,
-            optimizer,
-            clip_grad=config.TRAIN.CLIP_GRAD,
-            parameters=list(meta_lrs) + lora_params,
-            update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0,
-        )
-
-        if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
-            if getattr(model, 'adalora_scheduler', None):
-                model.adalora_scheduler.step()
-            optimizer.zero_grad()
-            lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
-
-        loss_scale_value = loss_scaler.state_dict()["scale"]
-
-        loss_meter.update(meta_loss.item())
-        if grad_norm is not None:
-            norm_meter.update(grad_norm)
-        scaler_meter.update(loss_scale_value)
-        batch_time.update(time.perf_counter() - end)
-        end = time.perf_counter()
-
-        if wandb_available:
-            metrics = {
-                "train/epoch_ndx": epoch,
-                "train/batch_ndx": idx,
-                "train/train_loss": loss_meter.val,
-                "train/train_loss_avg": loss_meter.avg,
-                "train/learning_rate": optimizer.param_groups[0]["lr"],
-                "train/weight_decay": optimizer.param_groups[0]['weight_decay'],
-                "train/time": batch_time.val,
-                "train/time_avg": batch_time.avg,
-                "train/grad_norm": norm_meter.val,
-                "train/grad_norm_avg": norm_meter.avg,
-                "train/loss_scale": scaler_meter.val,
-                "train/loss_scale_avg": scaler_meter.avg,
-                "train/memory": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
-            }
-            wandb.log(metrics)
-
-        if idx % config.PRINT_FREQ == 0:
-            lr = optimizer.param_groups[0]['lr']
-            wd = optimizer.param_groups[0]['weight_decay']
-            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-            etas = batch_time.avg * (num_steps - idx)
-            logger.info(
-                f'Meta-SGD Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
-                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
-                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
-                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
-                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
-                f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
-                f'mem {memory_used:.0f}MB')
-
-    epoch_time = time.perf_counter() - start
-    logger.info(
-        f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
-
-def reptile_train_one_epoch(
-        config,
-        model,
-        criterion,
-        data_loader,
-        optimizer,
-        epoch,
-        mixup_fn,
-        lr_scheduler,
-        loss_scaler,
-        task=None,
-        teacher=None):
-    """Train one epoch using Reptile style updates.
-
-    Each task performs a small inner-loop adaptation on a support set.
-    The parameter differences after adaptation are averaged and applied
-    directly to the model weights.
-    """
-
-    model.train()
-
-    num_steps = len(data_loader)
-    batch_time = AverageMeter()
-    loss_meter = AverageMeter()
-
-    start = time.perf_counter()
-    end = time.perf_counter()
-    loss_dict = None
-
-    for idx, batch in enumerate(data_loader):
-        samples = batch['image'].cuda(non_blocking=True)
-        targets = {t: batch[t].cuda(non_blocking=True) for t in config.TASKS}
-
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
-
-        for p in model.parameters():
-            p.requires_grad = False
-
-        lora_shared_params = [
-            p for n, p in model.named_parameters() if 'lora_shared_' in n and not config.MODEL.MTLORA.FREEZE_TA_LORA
-        ]
-        lora_task_params = {
-            t: [
-                p for n, p in model.named_parameters()
-                if not config.MODEL.MTLORA.FREEZE_TS_LORA and 'lora_tasks_' in n and f'.{t}' in n
-            ] for t in config.TASKS
-        }
-        lora_params = lora_shared_params + [p for params in lora_task_params.values() for p in params]
-        for p in lora_params:
-            p.requires_grad = True
-
-        shared_init_state = [p.detach().clone() for p in lora_shared_params]
-        shared_diff_list = []
-
-        task_losses = []
-        loss_dict = {}
-
-        for task_name in config.TASKS:
-            # reset shared parameters to their initial state for this task
-            for p, init in zip(lora_shared_params, shared_init_state):
-                p.data.copy_(init)
-
-            task_specific_params = lora_task_params[task_name]
-            task_init_state = [p.detach().clone() for p in task_specific_params]
-
-            task_params = lora_shared_params + task_specific_params
-
-            target = targets[task_name]
-
-            inner_steps = max(1, config.MODEL.MTLORA.MAML_INNER_STEPS)
-            for _ in range(inner_steps):
-                with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                    out = model.forward_task(samples, task_name)[task_name]
-                    loss = criterion.loss_ft[task_name](out, target)
-                    loss = criterion.loss_weights[task_name] * loss
-
-                grads = torch.autograd.grad(
-                    loss,
-                    task_params,
-                    allow_unused=True,
-                    create_graph=False,
-                )
-                grads = [torch.zeros_like(p) if g is None else g
-                         for p, g in zip(task_params, grads)]
-                inner_lr = config.MODEL.MTLORA.MAML_INNER_LR
-                for p, g in zip(task_params, grads):
-                    p.data = p.data - inner_lr * g
-
-            # compute loss after adaptation (for logging only)
-            with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-                out = model.forward_task(samples, task_name)[task_name]
-                t_loss = criterion.loss_ft[task_name](out, target)
-                t_loss = criterion.loss_weights[task_name] * t_loss
-
-            task_losses.append(t_loss)
-            loss_dict[task_name] = t_loss.detach()
-
-            shared_diff = [p.data - init for p, init in zip(lora_shared_params, shared_init_state)]
-            shared_diff_list.append(shared_diff)
-
-            meta_lr = optimizer.param_groups[0]['lr']
-            for p, init in zip(task_specific_params, task_init_state):
-                diff = p.data - init
-                p.data = init + meta_lr * diff
-
-        meta_lr = optimizer.param_groups[0]['lr']
-        if shared_diff_list:
-            final_diff = [
-                torch.stack([d[i] for d in shared_diff_list]).mean(0)
-                for i in range(len(lora_shared_params))
-            ]
-            for p, init, d in zip(lora_shared_params, shared_init_state, final_diff):
-                p.data = init + meta_lr * d
-
-        lr_scheduler.step_update(epoch * num_steps + idx)
-
-        meta_loss = torch.stack(task_losses).mean()
-        if getattr(model, 'adalora_scheduler', None):
-            ortho = model.adalora_scheduler.orthogonal_regularization()
-            meta_loss = meta_loss + model.adalora_scheduler.ortho_reg_coeff * ortho
-            model.adalora_scheduler.step()
-
-        loss_meter.update(meta_loss.item())
-        batch_time.update(time.perf_counter() - end)
-        end = time.perf_counter()
-
-        if wandb_available:
-            metrics = {
-                "train/epoch_ndx": epoch,
-                "train/batch_ndx": idx,
-                "train/train_loss": loss_meter.val,
-                "train/train_loss_avg": loss_meter.avg,
-                "train/learning_rate": optimizer.param_groups[0]["lr"],
-                "train/time": batch_time.val,
-                "train/time_avg": batch_time.avg,
-                "train/memory": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
-            }
-            wandb.log(metrics)
-
-        if idx % config.PRINT_FREQ == 0:
-            lr = optimizer.param_groups[0]['lr']
-            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-            etas = batch_time.avg * (num_steps - idx)
-            logger.info(
-                f'Reptile Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
-                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t'
-                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
-                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
-                f'mem {memory_used:.0f}MB')
-
-    epoch_time = time.perf_counter() - start
-    logger.info(
-        f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
 
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
     model.train()
@@ -1112,7 +325,6 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     start = time.perf_counter()
     end = time.perf_counter()
     loss_dict = None
-    task_loss_meters = {t: AverageMeter() for t in config.TASKS} if config.MTL else None
 
     for idx, batch in enumerate(data_loader):
         if not config.MTL:
@@ -1124,15 +336,11 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             targets = {task: batch[task].cuda(
                 non_blocking=True) for task in config.TASKS}
 
-
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             outputs = model(samples)
             loss, loss_dict = criterion(outputs, targets)
-        if getattr(model, 'adalora_scheduler', None):
-            ortho = model.adalora_scheduler.orthogonal_regularization()
-            loss = loss + model.adalora_scheduler.ortho_reg_coeff * ortho
 
         is_second_order = hasattr(
             optimizer, 'is_second_order') and optimizer.is_second_order
@@ -1140,8 +348,6 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                                 parameters=model.parameters(), create_graph=is_second_order,
                                 update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0)
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
-            if getattr(model, 'adalora_scheduler', None):
-                model.adalora_scheduler.step()
             optimizer.zero_grad()
             lr_scheduler.step_update(
                 (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
@@ -1157,10 +363,6 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if grad_norm is not None:  # loss_scaler return None if not update
             norm_meter.update(grad_norm)
         scaler_meter.update(loss_scale_value)
-        if config.MTL and loss_dict is not None:
-            for t in config.TASKS:
-                if t in loss_dict:
-                    task_loss_meters[t].update(loss_dict[t].item())
         batch_time.update(time.perf_counter() - end)
         end = time.perf_counter()
         if wandb_available:
@@ -1200,7 +402,6 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
 
     if config.EVAL_TRAINING is not None and (epoch % config.EVAL_TRAINING == 0):
         print("Training Eval:")
-        print("--------------------------------performance_meter--------------------------")
         performance_meter.update(
             {t: get_output(outputs[t], t) for t in config.TASKS}, targets)
 
@@ -1233,9 +434,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     epoch_time = time.perf_counter() - start
     logger.info(
         f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
-    if config.MTL:
-        return {t: m.avg for t, m in task_loss_meters.items()}
-    return None
+
 
 @torch.no_grad()
 def validate(config, data_loader, model, epoch):
@@ -1328,99 +527,6 @@ def validate(config, data_loader, model, epoch):
 
     return eval_results
 
-def train_with_rl(
-        config,
-        model,
-        criterion,
-        data_loader_train,
-        data_loader_val,
-        optimizer,
-        lr_scheduler,
-        loss_scaler,
-        mixup_fn,
-        logger,
-        teacher=None,
-):
-    """Training loop with RL-based task weighting."""
-    from rl_agent import TaskWeightAgent, extract_task_metrics, build_state, compute_reward
-
-    state_dim = len(config.TASKS) * 2
-    rl_agent = TaskWeightAgent(
-        state_dim,
-        len(config.TASKS),
-        hidden_dim=config.RL.HIDDEN_DIM,
-        lr=config.RL.LR,
-    )
-    prev_metrics = None
-    prev_losses = None
-
-    max_accuracy = 0.0
-    model_without_ddp = model
-    start_time = time.perf_counter()
-    for epoch in range(config.TRAIN.EPOCHS):
-        if not config.MTL:
-            data_loader_train.sampler.set_epoch(epoch)
-
-        state = build_state(config.TASKS, prev_losses, prev_metrics)
-        weights = rl_agent.select_weights(state)
-        criterion.update_weights({t: float(w) for t, w in zip(config.TASKS, weights)})
-
-        train_losses = None
-        if getattr(config.MODEL.MTLORA, 'REPTILE_MODE', False):
-            print("--------------------REPTILE---------------------")
-            reptile_train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
-            )
-        elif getattr(config.MODEL.MTLORA, 'METASGD_MODE', False):
-            print("--------------------Meta-SGD---------------------")
-            meta_sgd_train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
-            )
-        elif getattr(config.MODEL.MTLORA, 'TAML_MODE', False):
-            print("--------------------TAML---------------------")
-            taml_train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
-            )
-        elif config.MODEL.MTLORA.MAML_MODE:
-            print("--------------------MAML---------------------")
-            maml_train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
-            )
-        else:
-            print("--------------------MT-LORA---------------------")
-            train_losses = train_one_epoch(
-                config, model, criterion, data_loader_train, optimizer, epoch,
-                mixup_fn, lr_scheduler, loss_scaler, teacher=teacher,
-            )
-
-        if dist.get_rank() == 0 and (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
-            save_checkpoint(
-                config,
-                epoch,
-                model_without_ddp,
-                max_accuracy,
-                optimizer,
-                lr_scheduler,
-                loss_scaler,
-                logger,
-            )
-
-        eval_results = validate(config, data_loader_val, model, epoch)
-        current_metrics = extract_task_metrics(eval_results, config.TASKS)
-        reward = compute_reward(current_metrics, prev_metrics)
-        rl_agent.update(reward)
-        prev_metrics = current_metrics
-        prev_losses = train_losses
-
-    validate(config, data_loader_val, model, epoch)
-    total_time = time.perf_counter() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    logger.info('Training time {}'.format(total_time_str))
-
 
 @torch.no_grad()
 def throughput(data_loader, model, logger):
@@ -1444,9 +550,6 @@ def throughput(data_loader, model, logger):
 
 
 if __name__ == '__main__':
-    # args：argparse.Namespace 类型，记录所有命令行参数；
-    #
-    # config：CfgNode 或自定义 get_config() 返回的配置对象（一般是 YAML 的结构化表示，支持嵌套）。
     args, config = parse_option()
 
     if config.AMP_OPT_LEVEL:
@@ -1461,7 +564,7 @@ if __name__ == '__main__':
         world_size = -1
     torch.cuda.set_device(config.LOCAL_RANK)
     torch.distributed.init_process_group(
-        backend='gloo', init_method='env://', world_size=world_size, rank=rank)
+        backend='nccl', init_method='env://', world_size=world_size, rank=rank)
     torch.distributed.barrier()
 
     seed = config.SEED + dist.get_rank()
@@ -1473,11 +576,11 @@ if __name__ == '__main__':
 
     # linear scale the learning rate according to total batch size, may not be optimal
     linear_scaled_lr = config.TRAIN.BASE_LR * \
-                       config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     linear_scaled_warmup_lr = config.TRAIN.WARMUP_LR * \
-                              config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     linear_scaled_min_lr = config.TRAIN.MIN_LR * \
-                           config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     # gradient accumulation also need to scale the learning rate
     if config.TRAIN.ACCUMULATION_STEPS > 1:
         linear_scaled_lr = linear_scaled_lr * config.TRAIN.ACCUMULATION_STEPS
@@ -1492,9 +595,7 @@ if __name__ == '__main__':
     os.makedirs(config.OUTPUT, exist_ok=True)
     logger = create_logger(output_dir=config.OUTPUT,
                            dist_rank=dist.get_rank(), name=f"{config.MODEL.NAME}")
-    eval_logger = create_eval_logger(output_dir=config.OUTPUT,
-                                     dist_rank=dist.get_rank(),
-                                     filename=f'eval_rank{dist.get_rank()}.txt')
+
     if dist.get_rank() == 0:
         path = os.path.join(config.OUTPUT, "config.json")
         with open(path, "w") as f:

@@ -1,9 +1,18 @@
 # --------------------------------------------------------
-# Swin Transformer
+# MTLoRA
+# GitHub: https://github.com/scale-lab/MTLoRA
+# Built upon Swin Transformer (https://github.com/microsoft/Swin-Transformer)
+#
+# Original file:
 # Copyright (c) 2021 Microsoft
-# Licensed under The MIT License [see LICENSE for details]
+# Licensed under the MIT License
 # Written by Ze Liu
+#
+# Modifications:
+# Copyright (c) 2024 SCALE Lab, Brown University
+# Licensed under the MIT License (see LICENSE for details)
 # --------------------------------------------------------
+
 
 import os
 import torch
@@ -150,36 +159,17 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger,
                 logger.warning(k)
     max_accuracy = 0.0
     if not config.EVAL_MODE and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint and not skip_decoder:
-        ckpt_opt = checkpoint["optimizer"]
-
-        def _param_groups_match(opt, ckpt_state):
-            ckpt_groups = ckpt_state.get("param_groups", [])
-            if len(ckpt_groups) != len(opt.param_groups):
-                return False
-            for ckpt_g, opt_g in zip(ckpt_groups, opt.param_groups):
-                if len(ckpt_g.get("params", [])) != len(opt_g.get("params", [])):
-                    return False
-            return True
-
-        if _param_groups_match(optimizer, ckpt_opt):
-            try:
-                optimizer.load_state_dict(ckpt_opt)
-                lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-                config.defrost()
-                config.TRAIN.START_EPOCH = checkpoint['epoch'] + 1
-                config.freeze()
-                if 'scaler' in checkpoint:
-                    loss_scaler.load_state_dict(checkpoint['scaler'])
-                logger.info(
-                    f"=> loaded successfully '{resume_path}' (epoch {checkpoint['epoch']})")
-                if 'max_accuracy' in checkpoint:
-                    max_accuracy = checkpoint['max_accuracy']
-            except ValueError as e:
-                logger.warning(
-                    f"Failed to load optimizer state due to mismatch: {e}. Skipping optimizer and scheduler state.")
-        else:
-            logger.warning(
-                "Optimizer param groups in checkpoint do not match current model. Skipping optimizer and scheduler state.")
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+        config.defrost()
+        config.TRAIN.START_EPOCH = checkpoint['epoch'] + 1
+        config.freeze()
+        if 'scaler' in checkpoint:
+            loss_scaler.load_state_dict(checkpoint['scaler'])
+        logger.info(
+            f"=> loaded successfully '{resume_path}' (epoch {checkpoint['epoch']})")
+        if 'max_accuracy' in checkpoint:
+            max_accuracy = checkpoint['max_accuracy']
 
     del checkpoint
     torch.cuda.empty_cache()
@@ -361,28 +351,17 @@ class NativeScalerWithGradNormCount:
     def __init__(self):
         self._scaler = torch.cuda.amp.GradScaler()
 
-    def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True, retain_graph=False):
-        self._scaler.scale(loss).backward(create_graph=create_graph, retain_graph=retain_graph)
+    def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
+        self._scaler.scale(loss).backward(create_graph=create_graph)
         if update_grad:
-            if parameters is None:
-                parameters = [p for g in optimizer.param_groups for p in g['params']]
-
-            grads = [p for p in parameters if p.grad is not None]
-            if not grads:
-                # nothing to update, only advance scaler state
-                # self._scaler.update()
-                return None
-
             if clip_grad is not None:
-                # assert parameters is not None
+                assert parameters is not None
                 # unscale the gradients of optimizer's assigned params in-place
                 self._scaler.unscale_(optimizer)
-                # norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
-                norm = torch.nn.utils.clip_grad_norm_(grads, clip_grad)
+                norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
             else:
                 self._scaler.unscale_(optimizer)
-                # norm = ampscaler_get_grad_norm(parameters)
-                norm = ampscaler_get_grad_norm(grads)
+                norm = ampscaler_get_grad_norm(parameters)
             self._scaler.step(optimizer)
             self._scaler.update()
         else:

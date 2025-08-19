@@ -1,8 +1,16 @@
-# Derived from https://github.com/microsoft/LoRA
-#  ------------------------------------------------------------------------------------------
-#  Copyright (c) Microsoft Corporation. All rights reserved.
-#  Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
-#  ------------------------------------------------------------------------------------------
+# --------------------------------------------------------
+# MTLoRA
+# GitHub: https://github.com/scale-lab/MTLoRA
+# Built upon Microsoft LoRA (https://github.com/microsoft/LoRA)
+#
+# Original file:
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License
+#
+# Adapted file:
+# Copyright (c) 2024 SCALE Lab, Brown University
+# Licensed under the MIT License (see LICENSE for details)
+# --------------------------------------------------------
 
 r"""
     Low Ranking Adaptation for LLMs scheme.
@@ -148,73 +156,6 @@ class LoRALinear(LoRALayer):
         return pretrained + lora
 
 
-class DynamicInputTSLoRAModule(nn.Module):
-    """Dynamically routes input through multiple task-specific LoRA adapters.
-
-    For each input vector ``x`` this module generates routing weights that are
-    used to form a weighted combination of task specific LoRA parameters. The
-    resulting low-rank adaptation is applied to ``x`` and scaled by ``alpha``.
-
-    Args:
-        in_dim: Dimension of the input features.
-        out_dim: Dimension of the LoRA output.
-        r: Rank of each LoRA adapter.
-        t: Number of task specific LoRA adapters.
-        alpha: Scaling factor applied to the LoRA output.
-    """
-
-    def __init__(self, in_dim: int, out_dim: int, r: int, t: int, alpha: float) -> None:
-        super().__init__()
-        self.alpha = alpha
-        self.A_list = nn.ParameterList(
-            [nn.Parameter(torch.empty(r, in_dim)) for _ in range(t)])
-        self.B_list = nn.ParameterList(
-            [nn.Parameter(torch.empty(out_dim, r)) for _ in range(t)])
-        self.W_route = nn.Linear(in_dim, t)
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        self.W_route.reset_parameters()
-        for A, B in zip(self.A_list, self.B_list):
-            nn.init.kaiming_uniform_(A, a=math.sqrt(5))
-            nn.init.zeros_(B)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute the dynamically fused LoRA adaptation for ``x``.
-
-        This implementation supports inputs with arbitrary leading dimensions
-        (e.g. ``[batch, tokens, in_dim]``) by operating on a flattened view and
-        restoring the original shape afterwards.
-
-        Args:
-            x: Input tensor ending with dimension ``in_dim``.
-
-        Returns:
-            LoRA adaptation tensor with the same leading dimensions as ``x``
-            and trailing dimension ``out_dim``.
-        """
-
-        orig_shape = x.shape
-        x_flat = x.reshape(-1, orig_shape[-1])  # [B*, in_dim]
-
-        # Compute routing weights from the input itself
-        weights = torch.softmax(self.W_route(x_flat), dim=-1)  # [B*, T]
-
-        # Stack parameters for efficient batch processing
-        A = torch.stack(list(self.A_list), dim=0)  # [T, r, in_dim]
-        B = torch.stack(list(self.B_list), dim=0)  # [T, out_dim, r]
-
-        # Form dynamic LoRA parameters for each sample in the batch
-        A_dyn = torch.einsum('bt,trd->brd', weights, A)  # [B*, r, in_dim]
-        B_dyn = torch.einsum('bt,tdr->bdr', weights, B)  # [B*, out_dim, r]
-
-        # Apply the low-rank adaptation without explicit loops over batch
-        after_A = torch.einsum('bd,brd->br', x_flat, A_dyn)  # [B*, r]
-        lora_out = torch.einsum('br,bdr->bd', after_A, B_dyn)  # [B*, out_dim]
-
-        return self.alpha * lora_out.view(*orig_shape[:-1], -1)
-
-
 class MTLoRALinear(LoRALayer):
     # LoRA implemented in a dense layer
     def __init__(
@@ -231,7 +172,6 @@ class MTLoRALinear(LoRALayer):
         trainable_scale_shared=False,
         trainable_scale_per_task=False,
         shared_mode: str = 'matrix',
-        use_adapter: bool = False,
         **kwargs,
     ):
         assert shared_mode in ['matrix', 'matrixv2',
@@ -255,25 +195,18 @@ class MTLoRALinear(LoRALayer):
 
         self.tasks = tasks
         self.shared_mode = shared_mode
-        self.use_adapter = use_adapter
         if r['shared'] > 0:
             if has_tasks:
-                if self.use_adapter:
-                    self.lora_tasks_adapter = nn.ModuleDict({
-                        task: HoulsbyAdapter(out_features, r[task])
-                        for task in tasks
-                    })
-                else:
-                    self.lora_tasks_A = nn.ParameterDict({
-                        task: nn.Parameter(
-                            self.linear.weight.new_zeros((r[task], in_features)))
-                        for task in tasks
-                    })
-                    self.lora_tasks_B = nn.ParameterDict({
-                        task: nn.Parameter(
-                            self.linear.weight.new_zeros((out_features, r[task])))
-                        for task in tasks
-                    })
+                self.lora_tasks_A = nn.ParameterDict({
+                    task: nn.Parameter(
+                        self.linear.weight.new_zeros((r[task], in_features)))
+                    for task in tasks
+                })
+                self.lora_tasks_B = nn.ParameterDict({
+                    task: nn.Parameter(
+                        self.linear.weight.new_zeros((out_features, r[task])))
+                    for task in tasks
+                })
                 if trainable_scale_per_task:
                     self.lora_task_scale = nn.ParameterDict({
                         task: nn.Parameter(torch.FloatTensor(
@@ -287,13 +220,10 @@ class MTLoRALinear(LoRALayer):
                 assert has_tasks
                 self.lora_norm = nn.LayerNorm(out_features)
             elif self.shared_mode == 'matrix' or self.shared_mode == 'matrixv2':
-                if self.use_adapter:
-                    self.lora_shared_adapter = HoulsbyAdapter(out_features, r['shared'])
-                else:
-                    self.lora_shared_A = nn.Parameter(
-                        self.linear.weight.new_zeros((r['shared'], in_features)))
-                    self.lora_shared_B = nn.Parameter(
-                        self.linear.weight.new_zeros((out_features, r['shared'])))
+                self.lora_shared_A = nn.Parameter(
+                    self.linear.weight.new_zeros((r['shared'], in_features)))
+                self.lora_shared_B = nn.Parameter(
+                    self.linear.weight.new_zeros((out_features, r['shared'])))
             else:
                 raise NotImplementedError
             if trainable_scale_shared:
@@ -315,11 +245,6 @@ class MTLoRALinear(LoRALayer):
                 nn.init.kaiming_uniform_(
                     self.lora_tasks_A[task], a=math.sqrt(5))
                 nn.init.zeros_(self.lora_tasks_B[task])
-        if hasattr(self, "lora_tasks_adapter"):
-            for adapter in self.lora_tasks_adapter.values():
-                adapter.reset_parameters()
-        if hasattr(self, "lora_shared_adapter"):
-            self.lora_shared_adapter.reset_parameters()
 
     def merge(self):
         """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
@@ -332,98 +257,32 @@ class MTLoRALinear(LoRALayer):
             return pretrained, None
         x = self.lora_dropout(x)
         if self.shared_mode == 'matrix':
-            if self.use_adapter:
-                lora = self.lora_shared_adapter(pretrained) * self.lora_shared_scale
-                if self.tasks is not None:
-                    lora_tasks = {
-                        task: pretrained + self.lora_tasks_adapter[task](
-                            pretrained if x_tasks is None else self.linear(x_tasks[task])
-                        ) * self.lora_task_scale[task]
-                        for task in self.tasks
-                    }
-                else:
-                    lora_tasks = None
-            else:
-                lora = (x @ self.lora_shared_A.transpose(0, 1)
-                        @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
-                if self.tasks is not None:
-                    lora_tasks = {
-                        task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                            0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                        for task in self.tasks
-                    }
-                else:
-                    lora_tasks = None
+            lora = (x @ self.lora_shared_A.transpose(0, 1)
+                    @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+            lora_tasks = {
+                task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
+                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
+                for task in self.tasks
+            } if self.tasks is not None else None
         elif self.shared_mode == 'matrixv2':
-            if self.use_adapter:
-                lora = self.lora_shared_adapter(pretrained) * self.lora_shared_scale
-                if self.tasks is not None:
-                    lora_tasks = {
-                        task: pretrained + lora + self.lora_tasks_adapter[task](
-                            pretrained if x_tasks is None else self.linear(x_tasks[task])
-                        ) * self.lora_task_scale[task]
-                        for task in self.tasks
-                    }
-                else:
-                    lora_tasks = None
-            else:
-                lora = (x @ self.lora_shared_A.transpose(0, 1)
-                        @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
-                if self.tasks is not None:
-                    lora_tasks = {
-                        task: pretrained + lora + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                            0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                        for task in self.tasks
-                    }
-                else:
-                    lora_tasks = None
+            lora = (x @ self.lora_shared_A.transpose(0, 1)
+                    @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+            lora_tasks = {
+                task: pretrained + lora + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
+                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
+                for task in self.tasks
+            } if self.tasks is not None else None
         elif self.shared_mode == 'addition':
-            if self.tasks is not None:
-                if self.use_adapter:
-                    lora_tasks = {
-                        task: pretrained + self.lora_tasks_adapter[task](
-                            pretrained if x_tasks is None else self.linear(x_tasks[task])
-                        ) * self.lora_task_scale[task]
-                        for task in self.tasks
-                    }
-                else:
-                    lora_tasks = {
-                        task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                            0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                        for task in self.tasks
-                    }
-            else:
-                lora_tasks = None
+            lora_tasks = {
+                task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
+                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
+                for task in self.tasks
+            } if self.tasks is not None else None
             lora = self.lora_norm(torch.sum(torch.stack(
                 list(lora_tasks.values()), dim=0), dim=0))
-        if hasattr(self, 'ts_lora'):
-            lora = lora + self.ts_lora(x)
-            lora_tasks = None
 
         return pretrained + lora, lora_tasks
 
-class HoulsbyAdapter(nn.Module):
-    """Houlsby-style adapter consisting of a bottleneck MLP with residual."""
-
-    def __init__(self, dim: int, bottleneck: int) -> None:
-        super().__init__()
-        self.down = nn.Linear(dim, bottleneck)
-        self.act = nn.ReLU()
-        self.up = nn.Linear(bottleneck, dim)
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.down.weight, a=math.sqrt(5))
-        if self.down.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.down.weight)
-            bound = 1 / math.sqrt(fan_in)
-            nn.init.uniform_(self.down.bias, -bound, bound)
-        nn.init.zeros_(self.up.weight)
-        if self.up.bias is not None:
-            nn.init.zeros_(self.up.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.up(self.act(self.down(x)))
 
 class MTLoRAQKV(LoRALayer):
     def __init__(
@@ -440,7 +299,6 @@ class MTLoRAQKV(LoRALayer):
         trainable_scale_shared=False,
         trainable_scale_per_task=False,
         shared_mode: str = 'matrix',
-        use_adapter: bool = False,
         **kwargs,
     ):
         if isinstance(r, int):
@@ -448,11 +306,11 @@ class MTLoRAQKV(LoRALayer):
         super().__init__(r=r, lora_alpha=lora_shared_scale, lora_dropout=lora_dropout)
         self.tasks = tasks
         self.q = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, use_adapter=use_adapter, **kwargs)
+                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
         self.k = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, use_adapter=use_adapter, **kwargs)
+                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
         self.v = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, use_adapter=use_adapter, **kwargs)
+                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
 
     def reset_parameters(self):
         self.q.reset_parameters()
@@ -732,7 +590,7 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", freeze_pat
     Raises:
         NotImplementedError: if `bias` not in ["none", "lora_only", "all"]
     """
-    def lora_filter(key): return "lora_" in key or "ts_lora" in key
+    def lora_filter(key): return "lora_" in key
     def patch_embed_filter(
         key): return not freeze_patch_embed and "patch_embed" in key
 
@@ -771,94 +629,9 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", freeze_pat
     else:
         raise NotImplementedError
 
-def freeze_task_specific_lora(model: nn.Module) -> None:
-    """Freeze all task specific LoRA parameters."""
-    for name, param in model.named_parameters():
-        if 'lora_tasks_' in name or 'lora_task_scale' in name:
-            param.requires_grad = False
-
-def freeze_task_agnostic_lora(model: nn.Module) -> None:
-    """Freeze all task agnostic (shared) LoRA parameters."""
-    for name, param in model.named_parameters():
-        if 'lora_shared_' in name or 'lora_shared_scale' in name:
-            param.requires_grad = False
-
-def replace_ts_lora_with_dynamic(model: nn.Module, num_ts_lora: int, alpha: float = 1.0) -> None:
-    """Replace task specific LoRA weights with :class:`DynamicInputTSLoRAModule`.
-
-    After replacement each module will contain a ``ts_lora`` attribute providing
-    the dynamic routing behaviour while original task specific parameters are
-    removed.
-    """
-
-    for module in model.modules():
-        if hasattr(module, "lora_tasks_A") and module.lora_tasks_A:
-            tasks = list(module.lora_tasks_A.keys())
-            in_dim = module.lora_tasks_A[tasks[0]].size(1)
-            out_dim = module.lora_tasks_B[tasks[0]].size(0)
-            r = module.lora_tasks_A[tasks[0]].size(0)
-            t = num_ts_lora if num_ts_lora > 0 else len(tasks)
-            dyn = DynamicInputTSLoRAModule(in_dim, out_dim, r, t, alpha)
-            for i, task in enumerate(tasks[:t]):
-                dyn.A_list[i].data.copy_(module.lora_tasks_A[task].data)
-                scale = module.lora_task_scale[task]
-                if isinstance(scale, torch.Tensor):
-                    scale = scale.item()
-                dyn.B_list[i].data.copy_(module.lora_tasks_B[task].data * scale)
-            module.ts_lora = dyn
-            del module.lora_tasks_A
-            del module.lora_tasks_B
-            del module.lora_task_scale
-            module.tasks = None
-
-
-def consolidate_task_lora_to_shared(model: nn.Module) -> None:
-    """Convert all task specific LoRA weights to shared LoRA weights."""
-    for module in model.modules():
-        if hasattr(module, "lora_tasks_A") and hasattr(module, "lora_shared_A"):
-            with torch.no_grad():
-                r = module.lora_shared_A.size(0)
-                delta = module.lora_shared_B @ module.lora_shared_A
-                if isinstance(module.lora_shared_scale, torch.Tensor):
-                    delta = delta * module.lora_shared_scale.item()
-                else:
-                    delta = delta * module.lora_shared_scale
-                for task in list(module.lora_tasks_A.keys()):
-                    scale = module.lora_task_scale[task]
-                    if isinstance(scale, torch.Tensor):
-                        scale = scale.item()
-                    delta += (module.lora_tasks_B[task] @ module.lora_tasks_A[task]) * scale
-                u, s, vh = torch.linalg.svd(delta, full_matrices=False)
-                u = u[:, :r]
-                s = s[:r]
-                vh = vh[:r, :]
-                module.lora_shared_B.data.copy_(u @ torch.diag(torch.sqrt(s)))
-                module.lora_shared_A.data.copy_(torch.diag(torch.sqrt(s)) @ vh)
-            del module.lora_tasks_A
-            del module.lora_tasks_B
-            del module.lora_task_scale
-            module.tasks = None
-
-def print_lora_layer_summary(model: nn.Module) -> None:
-    """Log how many TA-LoRA and TS-LoRA layers are present in the model."""
-    ta_count = 0
-    ts_layers = []
-    for name, module in model.named_modules():
-        if hasattr(module, "lora_shared_A"):
-            ta_count += 1
-        if hasattr(module, "lora_tasks_A"):
-            ts_layers.append(name)
-
-    print(f"TA-LoRA layers: {ta_count}")
-    if ts_layers:
-        print("WARNING: The following TS-LoRA layers remain and were not consolidated:")
-        for layer in ts_layers:
-            print(f" - {layer}")
-    else:
-        print("No TS-LoRA layers remain. Model ready for TA-LoRA training.")
 
 def lora_filter(key: str, value: Any) -> bool:
-    return "lora_" in key or "ts_lora" in key
+    return "lora_" in key
 
 
 def merge_lora_weights(model) -> None:

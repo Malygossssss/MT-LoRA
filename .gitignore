@@ -16,9 +16,6 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-backbone/
-output/
-PASCAL_MT/
 dist/
 downloads/
 eggs/

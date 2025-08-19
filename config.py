@@ -1,9 +1,18 @@
 # --------------------------------------------------------
-# Swin Transformer
+# MTLoRA
+# GitHub: https://github.com/scale-lab/MTLoRA
+# Built upon Swin Transformer (https://github.com/microsoft/Swin-Transformer)
+#
+# Original file:
 # Copyright (c) 2021 Microsoft
-# Licensed under The MIT License [see LICENSE for details]
+# Licensed under the MIT License
 # Written by Ze Liu
-# --------------------------------------------------------'
+#
+# Modifications:
+# Copyright (c) 2024 SCALE Lab, Brown University
+# Licensed under the MIT License (see LICENSE for details)
+# --------------------------------------------------------
+
 
 import os
 import yaml
@@ -198,14 +207,6 @@ _C.TRAIN.LR_SCHEDULER.DECAY_RATE = 0.1
 _C.TRAIN.LR_SCHEDULER.WARMUP_PREFIX = True
 # [SimMIM] Gamma / Multi steps value, used in MultiStepLRScheduler
 _C.TRAIN.LR_SCHEDULER.GAMMA = 0.1
-
-# -----------------------------------------------------------------------------
-# Reinforcement learning settings for dynamic task weighting
-# -----------------------------------------------------------------------------
-_C.RL = CN()
-_C.RL.ENABLED = False
-_C.RL.HIDDEN_DIM = 64
-_C.RL.LR = 1e-3
 _C.TRAIN.LR_SCHEDULER.MULTISTEPS = []
 _C.TRAIN.SKIP_DECODER_CKPT = False
 
@@ -304,15 +305,7 @@ _C.MODEL.PER_TASK_DOWNSAMPLER = True
 _C.MODEL.UPDATE_RELATIVE_POSITION = False
 
 _C.MODEL.MTLORA = CN()
-_C.MODEL.MTLORA.MAML_MODE = False
-_C.MODEL.MTLORA.REPTILE_MODE = False
-_C.MODEL.MTLORA.METASGD_MODE = False
-_C.MODEL.MTLORA.METASGD_INIT = 0.001
-_C.MODEL.MTLORA.TAML_MODE = False
-_C.MODEL.MTLORA.TAML_LAMBDA = 0.0
 _C.MODEL.MTLORA.ENABLED = False
-_C.MODEL.MTLORA.MAML_INNER_STEPS = 1
-_C.MODEL.MTLORA.MAML_INNER_LR = 0.001
 _C.MODEL.MTLORA.BIAS = 'none'  # none, all, lora_only
 _C.MODEL.MTLORA.R = [8, 8, 8, 8]
 _C.MODEL.MTLORA.SHARED_SCALE = [2.0, 2.0, 2.0, 2.0]
@@ -331,25 +324,7 @@ _C.MODEL.MTLORA.PROJ_ENABLED = True
 _C.MODEL.MTLORA.FC1_ENABLED = True
 _C.MODEL.MTLORA.FC2_ENABLED = True
 _C.MODEL.MTLORA.DOWNSAMPLER_ENABLED = False
-_C.MODEL.MTLORA.FREEZE_TS_LORA = False
-_C.MODEL.MTLORA.FREEZE_TA_LORA = False
-_C.MODEL.MTLORA.DYNAMIC_TS_LORA = False
-_C.MODEL.MTLORA.TS_LORA_NUM = 0
-_C.MODEL.MTLORA.TS_ADAPTER = False
-_C.MODEL.MTLORA.ADALORA = CN()
-_C.MODEL.MTLORA.ADALORA.ENABLED = False
-_C.MODEL.MTLORA.ADALORA.INIT_RANK = 0
-_C.MODEL.MTLORA.ADALORA.TARGET_RANK = 0
-_C.MODEL.MTLORA.ADALORA.MIN_RANK = 0
-_C.MODEL.MTLORA.ADALORA.ORTHO_REG = 0.0
-_C.MODEL.MTLORA.ADALORA.SCHEDULE_STEP = 100
-_C.MODEL.MTLORA.ADALORA.SCHEDULE_MODE = "linear"
-_C.MODEL.MTLORA.ADALORA.IMPORTANCE = "lambda_grad"
-_C.MODEL.MTLORA.ADALORA.MODE = "ta"
 
-# Convolution adaptation with depthwise separable adapters
-_C.MODEL.CONV_ADAPTER = CN()
-_C.MODEL.CONV_ADAPTER.ENABLED = False
 
 def _update_config_from_file(config, cfg_file):
     config.defrost()

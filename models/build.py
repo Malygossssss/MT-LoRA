@@ -1,15 +1,22 @@
 # --------------------------------------------------------
-# Swin Transformer
+# MTLoRA
+# GitHub: https://github.com/scale-lab/MTLoRA
+# Built upon Swin Transformer (https://github.com/microsoft/Swin-Transformer)
+#
+# Original file:
 # Copyright (c) 2021 Microsoft
-# Licensed under The MIT License [see LICENSE for details]
+# Licensed under the MIT License
 # Written by Ze Liu
+#
+# Modifications:
+# Copyright (c) 2024 SCALE Lab, Brown University
+# Licensed under the MIT License (see LICENSE for details)
 # --------------------------------------------------------
+
 
 from .swin_transformer_mtlora import SwinTransformerMTLoRA
 from .swin_transformer import SwinTransformer
 from .swin_mtl import MultiTaskSwin
-from .conv_adapter import add_conv_adapters
-from .lora import replace_ts_lora_with_dynamic
 
 
 def build_model(config, is_pretrain=False):
@@ -70,17 +77,6 @@ def build_model(config, is_pretrain=False):
                                     fused_window_process=config.FUSED_WINDOW_PROCESS)
     else:
         raise NotImplementedError(f"Unkown model: {model_type}")
-
-    if config.MODEL.CONV_ADAPTER.ENABLED:
-        replaced = add_conv_adapters(model)
-        if replaced:
-            print("ConvAdapter replaced layers:")
-            for layer in replaced:
-                print(f" - {layer}")
-        else:
-            print("ConvAdapter enabled but no Conv2d layers were found.")
-    if config.MODEL.MTLORA.ENABLED and getattr(config.MODEL.MTLORA, 'DYNAMIC_TS_LORA', False):
-        replace_ts_lora_with_dynamic(model, config.MODEL.MTLORA.TS_LORA_NUM)
 
     return model
 

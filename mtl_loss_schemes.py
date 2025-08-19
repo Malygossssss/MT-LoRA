@@ -1,6 +1,16 @@
+# --------------------------------------------------------
+# MTLoRA
+# GitHub: https://github.com/scale-lab/MTLoRA
 #
-# Authors: Simon Vandenhende
+# Original file:
 # Licensed under the CC BY-NC 4.0 license (https://creativecommons.org/licenses/by-nc/4.0/)
+# Written by Simon Vandenhende
+#
+# Modifications:
+# Copyright (c) 2024 SCALE Lab, Brown University
+# Licensed under the MIT License (see LICENSE for details)
+# --------------------------------------------------------
+
 
 import torch
 import torch.nn as nn
@@ -226,11 +236,6 @@ class MultiTaskLoss(nn.Module):
         out['total'] = torch.sum(torch.stack(
             [self.loss_weights[t] * out[t] for t in self.tasks]))
         return out['total'], out
-
-    def update_weights(self, new_weights: dict):
-        """Update task-specific loss weights."""
-        assert set(new_weights.keys()) == set(self.tasks)
-        self.loss_weights.update(new_weights)
 
 
 def get_loss(task_cfg, task=None, config={"DATA": {}}):
