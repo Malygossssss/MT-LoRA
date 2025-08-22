@@ -458,6 +458,14 @@ def validate(config, data_loader, model, epoch):
         loss_weights[t] = all_loss_weights[t]
     criterion = MultiTaskLoss(config.TASKS, loss_ft, loss_weights)
 
+    # Ensure evaluation metrics are logged with the main logger
+    eval_logger = logging.getLogger('eval')
+    if not eval_logger.handlers:
+        for h in logger.handlers:
+            eval_logger.addHandler(h)
+    eval_logger.setLevel(logger.level)
+    eval_logger.propagate = False
+
     model.eval()
     num_val_points = 0
     logger.info("Start eval")
