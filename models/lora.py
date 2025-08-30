@@ -60,7 +60,7 @@ from typing_extensions import Self
 
 
 class LoRALayer(nn.Module):
-    def __init__(self, r: int, lora_alpha: int, lora_dropout: float):
+    def __init__(self, r: int, lora_alpha: int, lora_dropout: float, lora_type: str = "TA"):
         """Store LoRA specific attributes in a class.
 
         Args:
@@ -75,6 +75,9 @@ class LoRALayer(nn.Module):
         assert r >= 0
         self.r = r
         self.lora_alpha = lora_alpha
+        # CoTo-Drop attributes
+        self.lora_type = lora_type
+        self.cotodrop = False
         # Optional dropout
         if lora_dropout > 0.0:
             self.lora_dropout = nn.Dropout(p=lora_dropout)
@@ -95,6 +98,7 @@ class LoRALinear(LoRALayer):
         r: int = 0,
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
+        lora_type: str = "TA",
         tasks=None,
         **kwargs,
     ):
@@ -116,7 +120,8 @@ class LoRALinear(LoRALayer):
                 https://arxiv.org/pdf/2106.09685.pdf (section 4.1)
             lora_dropout: dropout that is applied on the input in the LoRA branch (before multiplying by matrix A)
         """
-        super().__init__(r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+        super().__init__(r=r, lora_alpha=lora_alpha,
+                         lora_dropout=lora_dropout, lora_type=lora_type)
         self.linear = torch.nn.Linear(
             in_features, out_features, **kwargs)
 
@@ -153,6 +158,10 @@ class LoRALinear(LoRALayer):
             return pretrained
         lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1)
                 @ self.lora_B.transpose(0, 1)) * self.scaling
+        if self.lora_type == "TS":
+            return pretrained + lora
+        if self.cotodrop:
+            return pretrained
         return pretrained + lora
 
 
@@ -168,6 +177,7 @@ class MTLoRALinear(LoRALayer):
         lora_shared_scale: float = 1.0,
         lora_task_scale: float = 1.0,
         lora_dropout: float = 0.0,
+        lora_type: str = "TA",
         tasks=None,
         trainable_scale_shared=False,
         trainable_scale_per_task=False,
@@ -188,7 +198,8 @@ class MTLoRALinear(LoRALayer):
         if isinstance(r, int):
             r = {'shared': r}
         super().__init__(
-            r=r['shared'], lora_alpha=lora_shared_scale, lora_dropout=lora_dropout)
+            r=r['shared'], lora_alpha=lora_shared_scale,
+            lora_dropout=lora_dropout, lora_type=lora_type)
 
         self.linear = torch.nn.Linear(
             in_features, out_features, **kwargs)
@@ -281,6 +292,11 @@ class MTLoRALinear(LoRALayer):
             lora = self.lora_norm(torch.sum(torch.stack(
                 list(lora_tasks.values()), dim=0), dim=0))
 
+        if self.lora_type == "TS":
+            return pretrained + lora, lora_tasks
+        if self.cotodrop:
+            no_task = {task: pretrained for task in self.tasks} if self.tasks is not None else None
+            return pretrained, no_task
         return pretrained + lora, lora_tasks
 
 
@@ -295,6 +311,7 @@ class MTLoRAQKV(LoRALayer):
         lora_shared_scale: float = 1.0,
         lora_task_scale: float = 1.0,
         lora_dropout: float = 0.0,
+        lora_type: str = "TA",
         tasks=None,
         trainable_scale_shared=False,
         trainable_scale_per_task=False,
@@ -303,14 +320,15 @@ class MTLoRAQKV(LoRALayer):
     ):
         if isinstance(r, int):
             r = {'shared': r}
-        super().__init__(r=r, lora_alpha=lora_shared_scale, lora_dropout=lora_dropout)
+        super().__init__(r=r, lora_alpha=lora_shared_scale,
+                         lora_dropout=lora_dropout, lora_type=lora_type)
         self.tasks = tasks
         self.q = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
+                              lora_type=lora_type, tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
         self.k = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
+                              lora_type=lora_type, tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
         self.v = MTLoRALinear(in_features, out_features, r=r, lora_shared_scale=lora_shared_scale, lora_task_scale=lora_task_scale, lora_dropout=lora_dropout,
-                              tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
+                              lora_type=lora_type, tasks=tasks, trainable_scale_shared=trainable_scale_shared, trainable_scale_per_task=trainable_scale_per_task, shared_mode=shared_mode, **kwargs)
 
     def reset_parameters(self):
         self.q.reset_parameters()
@@ -338,6 +356,7 @@ class LoRAQKVLinear(LoRALinear):
         r: int = 0,
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
+        lora_type: str = "TA",
         enable_lora: Union[bool, Tuple[bool, bool, bool]] = False,
         **kwargs,
     ):
@@ -365,7 +384,8 @@ class LoRAQKVLinear(LoRALinear):
                 and `value` but keep `key` without weight updates we should pass `[True, False, True]`
         """
         super(LoRALinear, self).__init__(
-            r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+            r=r, lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout, lora_type=lora_type)
         self.linear = torch.nn.Linear(in_features, out_features, **kwargs)
         self.n_head = n_head
         self.n_query_groups = n_query_groups

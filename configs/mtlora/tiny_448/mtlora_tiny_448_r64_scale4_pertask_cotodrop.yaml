@@ -1,0 +1,10 @@
+BASE: ['mtlora_tiny_448_r64_scale4_pertask.yaml']
+
+MODEL:
+  NAME: mtlora_tiny_448_r64_scale4_pertask_cotodrop
+
+COTODROP:
+  ENABLED: True
+  INITIAL_P: 0.0
+  FINAL_P: 1.0
+  STAGE1_RATIO: 0.75

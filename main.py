@@ -19,6 +19,8 @@ import json
 import random
 import argparse
 import datetime
+import logging
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -41,6 +43,7 @@ from mtl_loss_schemes import MultiTaskLoss, get_loss
 from evaluation.evaluate_utils import PerformanceMeter, get_output
 from ptflops import get_model_complexity_info
 from models.lora import mark_only_lora_as_trainable
+from coto_callback import CoToSchedulerCallback
 
 try:
     import wandb
@@ -48,6 +51,11 @@ try:
 except ImportError:
     print("Warning: wandb library not found. Logging is disabled.")
     wandb_available = False
+
+
+def get_all_loras(model):
+    """Collect all LoRA layers."""
+    return [module for _, module in model.named_modules() if hasattr(module, "lora_type")]
 
 
 def parse_option():
@@ -275,6 +283,18 @@ def main(config):
     decoder_params = sum(p.numel() for name, p in model.named_parameters()
                          if 'backbone' not in name)
 
+    coto_scheduler = None
+    if config.COTODROP.ENABLED:
+        loras = get_all_loras(model)
+        coto_scheduler = CoToSchedulerCallback(
+            loras,
+            initial_p=config.COTODROP.INITIAL_P,
+            final_p=config.COTODROP.FINAL_P,
+            stage1_ratio=config.COTODROP.STAGE1_RATIO,
+        )
+        coto_scheduler.total_steps = len(data_loader_train) * config.TRAIN.EPOCHS
+        coto_scheduler.update_dropout_rate(coto_scheduler.initial_p)
+
     print(f"""
 Number of trainable params: {trainable_params:,}
 Decoder params:             {decoder_params:,}
@@ -292,7 +312,7 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
             data_loader_train.sampler.set_epoch(epoch)
 
         train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
-                        loss_scaler, teacher=teacher)
+                        loss_scaler, teacher=teacher, coto_scheduler=coto_scheduler)
         if dist.get_rank() == 0 and (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
             save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, loss_scaler,
                             logger)
@@ -310,7 +330,7 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
     logger.info('Training time {}'.format(total_time_str))
 
 
-def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
+def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None, coto_scheduler=None):
     model.train()
     optimizer.zero_grad()
 
@@ -351,6 +371,18 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             optimizer.zero_grad()
             lr_scheduler.step_update(
                 (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
+            if coto_scheduler is not None:
+                step = epoch * num_steps + idx + 1
+                end_step = math.ceil(coto_scheduler.total_steps * coto_scheduler.stage1_ratio)
+                rate = coto_scheduler.initial_p + (coto_scheduler.final_p - coto_scheduler.initial_p) * (step / end_step)
+                coto_scheduler.update_dropout_rate(min(rate, coto_scheduler.final_p))
+
+                if idx % 100 == 0 and dist.get_rank() == 0:
+                    ta_active = sum([not l.cotodrop for l in coto_scheduler.loras if l.lora_type == "TA"])
+                    ts_active = sum([not l.cotodrop for l in coto_scheduler.loras if l.lora_type == "TS"])
+                    print(f"[Epoch {epoch} | Step {step}] rate={rate:.3f} | "
+                          f"TA active={ta_active}/{len([l for l in coto_scheduler.loras if l.lora_type=='TA'])} | "
+                          f"TS active={ts_active}/{len([l for l in coto_scheduler.loras if l.lora_type=='TS'])}")
         loss_scale_value = loss_scaler.state_dict()["scale"]
 
         # torch.cuda.synchronize()
@@ -457,6 +489,14 @@ def validate(config, data_loader, model, epoch):
     for t in config.TASKS:
         loss_weights[t] = all_loss_weights[t]
     criterion = MultiTaskLoss(config.TASKS, loss_ft, loss_weights)
+
+    # Ensure evaluation metrics are logged with the main logger
+    eval_logger = logging.getLogger('eval')
+    if not eval_logger.handlers:
+        for h in logger.handlers:
+            eval_logger.addHandler(h)
+    eval_logger.setLevel(logger.level)
+    eval_logger.propagate = False
 
     model.eval()
     num_val_points = 0
@@ -576,11 +616,11 @@ if __name__ == '__main__':
 
     # linear scale the learning rate according to total batch size, may not be optimal
     linear_scaled_lr = config.TRAIN.BASE_LR * \
-        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+                       config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     linear_scaled_warmup_lr = config.TRAIN.WARMUP_LR * \
-        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+                              config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     linear_scaled_min_lr = config.TRAIN.MIN_LR * \
-        config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
+                           config.DATA.BATCH_SIZE * dist.get_world_size() / 512.0
     # gradient accumulation also need to scale the learning rate
     if config.TRAIN.ACCUMULATION_STEPS > 1:
         linear_scaled_lr = linear_scaled_lr * config.TRAIN.ACCUMULATION_STEPS
