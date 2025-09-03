@@ -41,6 +41,7 @@ Running MTLoRA code, is very simmilar to Swin's codebase:
     ```
 
 5. **通过脚本计算Δm**
+   ```python
    python compute_delta_m.py \
    --log-file /sde/wyf/project/MTLoRA-main/output/mtlora_tiny_448_r64_scale4_pertask_cotodrop/default/log_rank0.txt \
    --semseg-st 67.21 \
@@ -48,6 +49,7 @@ Running MTLoRA code, is very simmilar to Swin's codebase:
    --saliency-st 62.35 \
    --normals-st 17.97 \
    --csv-out delta_m_history.csv
+   ```
   
 ## Authorship
 Since the release commit is squashed, the GitHub contributors tab doesn't reflect the authors' contributions. The following authors contributed equally to this codebase:
