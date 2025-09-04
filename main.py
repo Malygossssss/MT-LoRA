@@ -262,6 +262,10 @@ def main(config):
                                         freeze_norm=config.TRAIN.FREEZE_LAYER_NORM,
                                         free_relative_bias=config.TRAIN.FREEZE_RELATIVE_POSITION_BIAS,
                                         freeze_downsample_reduction=True if config.MODEL.MTLORA.DOWNSAMPLER_ENABLED else config.TRAIN.FREEZE_DOWNSAMPLE_REDUCTION)
+            if config.MODEL.PROMPT.ENABLED:
+                for name, param in model.backbone.named_parameters():
+                    if "prompt_embeddings" in name or "deep_prompt_embeddings" in name:
+                        param.requires_grad = True
         else:
             print("Marking all layers as trainable")
     if config.MODEL.FREEZE_BACKBONE:

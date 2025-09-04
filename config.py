@@ -173,6 +173,15 @@ _C.MODEL.DECODER_CHANNELS = [18, 36, 72, 144]
 
 _C.MODEL.SEGFORMER_CHANNELS = 256
 
+# Visual Prompt Tuning settings
+_C.MODEL.PROMPT = CN()
+_C.MODEL.PROMPT.ENABLED = False
+_C.MODEL.PROMPT.NUM_TOKENS = 0
+_C.MODEL.PROMPT.DEEP = False
+_C.MODEL.PROMPT.DROPOUT = 0.0
+_C.MODEL.PROMPT.LOCATION = 'prepend'
+_C.MODEL.PROMPT.PROJECT = -1
+
 # -----------------------------------------------------------------------------
 # Training settings
 # -----------------------------------------------------------------------------
