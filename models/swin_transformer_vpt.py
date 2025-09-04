@@ -110,6 +110,8 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
             )
             self.layers.append(layer)
 
+        self.norm = norm_layer(self.num_features)
+
         self.prompt_config = prompt_config
         self.tasks = tasks
         self.mtlora = mtlora
@@ -303,16 +305,21 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
                 deep_prompt_embd = self.prompt_dropout(deep_prompt_embd_dict[task])
                 x = layer(x, task, deep_prompt_embd)
                 if return_stages:
-                    feats.append(x)
+                    feats.append(x[:, self.num_tokens:, :])
         else:
             for layer in self.layers:
                 x = layer(x, task)
                 if return_stages:
-                    feats.append(x)
-
-        x = self.norm(x)
+                    if self.prompt_config.LOCATION == "prepend":
+                        feats.append(x[:, self.num_tokens:, :])
+                    else:
+                        feats.append(x)
+        if self.norm is not None:
+            x = self.norm(x)
         if return_stages:
             return feats
+        if self.prompt_config.LOCATION == "prepend":
+            x = x[:, self.num_tokens:, :]
         x = self.avgpool(x.transpose(1, 2))
         x = torch.flatten(x, 1)
         return x
@@ -600,11 +607,18 @@ class PromptedSwinTransformerBlock(SwinTransformerBlock):
 
         attn_windows, attn_windows_lora_tasks = self.attn(x_windows, mask=self.attn_mask)
 
+        prompt_emb_lora_tasks = {}
         if self.prompt_location == "prepend":
             prompt_emb = attn_windows[:, :self.num_prompts, :]
             attn_windows = attn_windows[:, self.num_prompts:, :]
             prompt_emb = prompt_emb.view(-1, B, self.num_prompts, C)
             prompt_emb = prompt_emb.mean(0)
+            if attn_windows_lora_tasks is not None:
+                for task in self.tasks:
+                    prompt_emb_lora_tasks[task] = attn_windows_lora_tasks[task][:, :self.num_prompts, :]
+                    attn_windows_lora_tasks[task] = attn_windows_lora_tasks[task][:, self.num_prompts:, :]
+                    prompt_emb_lora_tasks[task] = prompt_emb_lora_tasks[task].view(-1, B, self.num_prompts, C)
+                    prompt_emb_lora_tasks[task] = prompt_emb_lora_tasks[task].mean(0)
 
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W)
@@ -615,12 +629,46 @@ class PromptedSwinTransformerBlock(SwinTransformerBlock):
             x = shifted_x
         x = x.view(B, H * W, C)
 
+        if attn_windows_lora_tasks is not None:
+            for task in self.tasks:
+                attn_windows_lora_tasks[task] = attn_windows_lora_tasks[task].view(
+                    -1, self.window_size, self.window_size, C
+                )
+                attn_windows_lora_tasks[task] = window_reverse(
+                    attn_windows_lora_tasks[task], self.window_size, H, W
+                )
+                if self.shift_size > 0:
+                    attn_windows_lora_tasks[task] = torch.roll(
+                        attn_windows_lora_tasks[task], shifts=(self.shift_size, self.shift_size), dims=(1, 2)
+                    )
+                attn_windows_lora_tasks[task] = attn_windows_lora_tasks[task].view(B, H * W, C)
+                if self.prompt_location == "prepend":
+                    attn_windows_lora_tasks[task] = torch.cat(
+                        (prompt_emb_lora_tasks[task], attn_windows_lora_tasks[task]), dim=1
+                    )
+                attn_windows_lora_tasks[task] = shortcut + self.drop_path(attn_windows_lora_tasks[task])
+
         if self.prompt_location == "prepend":
             x = torch.cat((prompt_emb, x), dim=1)
         x = shortcut + self.drop_path(x)
-        mlp_result, mlp_lora_tasks = self.mlp(self.norm2(x), attn_windows_lora_tasks)
-        x = x + self.drop_path(mlp_result)
-        return x, mlp_lora_tasks
+
+        mlp_input_tasks = (
+            {task: self.norm2(attn_windows_lora_tasks[task]) for task in self.tasks}
+            if attn_windows_lora_tasks is not None
+            else None
+        )
+        mlp_result, mlp_lora_tasks = self.mlp(self.norm2(x), mlp_input_tasks)
+
+        if mlp_lora_tasks is None:
+            return x + self.drop_path(mlp_result), None
+        else:
+            if attn_windows_lora_tasks is None:
+                for task in self.tasks:
+                    mlp_lora_tasks[task] = self.drop_path(mlp_lora_tasks[task])
+            else:
+                for task in self.tasks:
+                    mlp_lora_tasks[task] = attn_windows_lora_tasks[task] + self.drop_path(mlp_lora_tasks[task])
+            return x + self.drop_path(mlp_result), mlp_lora_tasks
 
 
 class PromptedWindowAttention(WindowAttention):
