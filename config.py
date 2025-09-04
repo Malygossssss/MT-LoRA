@@ -181,6 +181,7 @@ _C.MODEL.PROMPT.DEEP = False
 _C.MODEL.PROMPT.DROPOUT = 0.0
 _C.MODEL.PROMPT.LOCATION = 'prepend'
 _C.MODEL.PROMPT.PROJECT = -1
+_C.MODEL.PROMPT.INITIATION = 'random'
 
 # -----------------------------------------------------------------------------
 # Training settings

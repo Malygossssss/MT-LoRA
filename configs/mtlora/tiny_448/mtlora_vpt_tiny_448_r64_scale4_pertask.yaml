@@ -34,6 +34,7 @@ MODEL:
       depth: [4]
       shared: [64]
   PROMPT:
+    INITIATION: random
     ENABLED: True
     NUM_TOKENS: 50
     DEEP: True
