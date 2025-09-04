@@ -12,7 +12,7 @@ MODEL:
   MTLORA:
     ENABLED: True
     ADAPTIVE: True
-    R: [96, 96, 96, 96]
+    R: [64, 64, 64, 64]
     SHARED_SCALE: [4.0]
     TASK_SCALE: [4.0]
     DROPOUT: [0.05, 0.05, 0.05, 0.05]
@@ -26,8 +26,8 @@ MODEL:
     FC1_ENABLED: True
     FC2_ENABLED: True
     DOWNSAMPLER_ENABLED: False
-    ADAPTIVE_START_RANK: 96
-    ADAPTIVE_END_AVG_RANK: 64
+    ADAPTIVE_START_RANK: 64
+    ADAPTIVE_END_AVG_RANK: 32
     ADAPTIVE_START_PRUNE_STEP_RATIO: 0.15
     ADAPTIVE_END_PRUNE_STEP_RATIO: 0.6
     ADAPTIVE_PRUNE_INTERVAL_STEP: 100
@@ -35,13 +35,13 @@ MODEL:
     ADAPTIVE_EPS: 1.0e-8
     REGULARIZATION_LOSS_ALPHA: 0.1
     R_PER_TASK:
-      semseg: [96]
-      normals: [96]
-      sal: [96]
-      human_parts: [96]
-      edge: [96]
-      depth: [96]
-      shared: [96]
+      semseg: [4]
+      normals: [4]
+      sal: [4]
+      human_parts: [4]
+      edge: [4]
+      depth: [4]
+      shared: [64]
   DECODER_HEAD:
     semseg: hrnet
     normals: hrnet

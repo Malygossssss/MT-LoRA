@@ -606,7 +606,6 @@ if __name__ == '__main__':
                            dist_rank=dist.get_rank(), name=f"{config.MODEL.NAME}")
     eval_logger = create_logger(output_dir=config.OUTPUT,
                                 dist_rank=dist.get_rank(), name="eval")
-e
     if dist.get_rank() == 0:
         path = os.path.join(config.OUTPUT, "config.json")
         with open(path, "w") as f:
