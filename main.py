@@ -275,14 +275,14 @@ def main(config):
     decoder_params = sum(p.numel() for name, p in model.named_parameters()
                          if 'backbone' not in name)
 
-    print(f"""
-Number of trainable params: {trainable_params:,}
-Decoder params:             {decoder_params:,}
-LoRA params:                {lora_params:,}
-Extra params:                {(trainable_params - (lora_params + decoder_params)):,}
-Total params:               {total_model_params:,} (trainable ratio: {trainable_params/total_model_params * 100:2.2f}%)
-Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio: {trainable_params/total_model_params_without_lora * 100:2.2f}%)
-""")
+    logger.info(
+        f"\nNumber of trainable params: {trainable_params:,}\n"
+        f"Decoder params:             {decoder_params:,}\n"
+        f"LoRA params:                {lora_params:,}\n"
+        f"Extra params:                {(trainable_params - (lora_params + decoder_params)):,}\n"
+        f"Total params:               {total_model_params:,} (trainable ratio: {trainable_params/total_model_params * 100:2.2f}%)\n"
+        f"Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio: {trainable_params/total_model_params_without_lora * 100:2.2f}%)"
+    )
     logger.info("Start training")
     start_time = time.perf_counter()
 
