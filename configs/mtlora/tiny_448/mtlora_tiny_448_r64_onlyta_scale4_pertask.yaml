@@ -2,7 +2,7 @@ DATA:
   IMG_SIZE: 448
 MODEL:
   TYPE: swin
-  NAME: dora_tiny_448_start96_to64
+  NAME: mtlora_tiny_448_r64_onlyta_scale4_pertask.yaml
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
@@ -11,9 +11,9 @@ MODEL:
     WINDOW_SIZE: 7
   MTLORA:
     ENABLED: True
-    ADAPTIVE: True
     R: [64, 64, 64, 64]
     SHARED_SCALE: [4.0]
+    SHARED_MODE: lora_only      # 仅使用任务无关的 TA‑LoRA
     TASK_SCALE: [4.0]
     DROPOUT: [0.05, 0.05, 0.05, 0.05]
     TRAINABLE_SCALE_SHARED: False
@@ -26,21 +26,13 @@ MODEL:
     FC1_ENABLED: True
     FC2_ENABLED: True
     DOWNSAMPLER_ENABLED: False
-    ADAPTIVE_START_RANK: 64
-    ADAPTIVE_END_AVG_RANK: 32
-    ADAPTIVE_START_PRUNE_STEP_RATIO: 0.15
-    ADAPTIVE_END_PRUNE_STEP_RATIO: 0.6
-    ADAPTIVE_PRUNE_INTERVAL_STEP: 100
-    ADAPTIVE_SENSITIVITY_BETA: 0.9
-    ADAPTIVE_EPS: 1.0e-8
-    REGULARIZATION_LOSS_ALPHA: 0.1
     R_PER_TASK:
-      semseg: [4]
-      normals: [4]
-      sal: [4]
-      human_parts: [4]
-      edge: [4]
-      depth: [4]
+      semseg: [0]
+      normals: [0]
+      sal: [0]
+      human_parts: [0]
+      edge: [0]
+      depth: [0]
       shared: [64]
   DECODER_HEAD:
     semseg: hrnet
