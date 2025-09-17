@@ -219,6 +219,14 @@ def main():
                     writer.writerow([
                         ep, cur["semseg_miou"], cur["human_miou"], cur["saliency_miou"], cur["normals_rmse"], d
                     ])
+                # ⚠️ 额外写入 best 结果
+                writer.writerow([])
+                writer.writerow([
+                    f"BEST(epoch {bep})",  # 这里带上 epoch
+                    bcur["semseg_miou"], bcur["human_miou"],
+                    bcur["saliency_miou"], bcur["normals_rmse"], bd
+                ])
+
             print(f"\nCSV 已写出：{args.csv_out}")
         except Exception as e:
             print(f"[WARN] 写 CSV 失败：{e}")
