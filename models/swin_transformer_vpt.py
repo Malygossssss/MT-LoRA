@@ -115,6 +115,7 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
         self.prompt_config = prompt_config
         self.tasks = tasks
         self.mtlora = mtlora
+        self.share_task_prompt = getattr(self.prompt_config, "SHARE_TASK_PROMPT", False)
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
         if self.prompt_config.LOCATION == "add":
@@ -147,21 +148,34 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
                 nn.init.zeros_(self.patch_embed.proj.bias)
 
                 self.prompt_embeddings = nn.ParameterDict()
-                for task in tasks:
+                if self.share_task_prompt:
                     emb = torch.zeros(1, num_tokens, img_size[0], img_size[1])
                     nn.init.uniform_(emb, -val, val)
-                    self.prompt_embeddings[task] = nn.Parameter(emb)
+                    self.prompt_embeddings["shared"] = nn.Parameter(emb)
+                else:
+                    for task in tasks:
+                        emb = torch.zeros(1, num_tokens, img_size[0], img_size[1])
+                        nn.init.uniform_(emb, -val, val)
+                        self.prompt_embeddings[task] = nn.Parameter(emb)
 
             elif self.prompt_config.LOCATION == "pad":
                 self.prompt_embeddings_tb = nn.ParameterDict()
                 self.prompt_embeddings_lr = nn.ParameterDict()
-                for task in tasks:
+                if self.share_task_prompt:
                     emb_tb = torch.zeros(1, 3, 2 * num_tokens, img_size[0])
                     emb_lr = torch.zeros(1, 3, img_size[0] - 2 * num_tokens, 2 * num_tokens)
                     nn.init.uniform_(emb_tb, 0.0, 1.0)
                     nn.init.uniform_(emb_lr, 0.0, 1.0)
-                    self.prompt_embeddings_tb[task] = nn.Parameter(emb_tb)
-                    self.prompt_embeddings_lr[task] = nn.Parameter(emb_lr)
+                    self.prompt_embeddings_tb["shared"] = nn.Parameter(emb_tb)
+                    self.prompt_embeddings_lr["shared"] = nn.Parameter(emb_lr)
+                else:
+                    for task in tasks:
+                        emb_tb = torch.zeros(1, 3, 2 * num_tokens, img_size[0])
+                        emb_lr = torch.zeros(1, 3, img_size[0] - 2 * num_tokens, 2 * num_tokens)
+                        nn.init.uniform_(emb_tb, 0.0, 1.0)
+                        nn.init.uniform_(emb_lr, 0.0, 1.0)
+                        self.prompt_embeddings_tb[task] = nn.Parameter(emb_tb)
+                        self.prompt_embeddings_lr[task] = nn.Parameter(emb_lr)
 
                 self.prompt_norm = tv.transforms.Normalize(
                     mean=[0.485, 0.456, 0.406],
@@ -170,17 +184,22 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
 
             else:
                 self.prompt_embeddings = nn.ParameterDict()
-                for task in tasks:
+                if self.share_task_prompt:
                     emb = torch.zeros(1, num_tokens, embed_dim)
                     nn.init.uniform_(emb, -val, val)
-                    self.prompt_embeddings[task] = nn.Parameter(emb)
+                    self.prompt_embeddings["shared"] = nn.Parameter(emb)
+                else:
+                    for task in tasks:
+                        emb = torch.zeros(1, num_tokens, embed_dim)
+                        nn.init.uniform_(emb, -val, val)
+                        self.prompt_embeddings[task] = nn.Parameter(emb)
 
                 if self.prompt_config.DEEP:
                     self.deep_prompt_embeddings_0 = nn.ParameterDict()
                     self.deep_prompt_embeddings_1 = nn.ParameterDict()
                     self.deep_prompt_embeddings_2 = nn.ParameterDict()
                     self.deep_prompt_embeddings_3 = nn.ParameterDict()
-                    for task in tasks:
+                    if self.share_task_prompt:
                         emb0 = torch.zeros(depths[0] - 1, num_tokens, embed_dim)
                         emb1 = torch.zeros(depths[1], num_tokens, embed_dim * 2)
                         emb2 = torch.zeros(depths[2], num_tokens, embed_dim * 4)
@@ -189,10 +208,24 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
                         nn.init.uniform_(emb1, -val, val)
                         nn.init.uniform_(emb2, -val, val)
                         nn.init.uniform_(emb3, -val, val)
-                        self.deep_prompt_embeddings_0[task] = nn.Parameter(emb0)
-                        self.deep_prompt_embeddings_1[task] = nn.Parameter(emb1)
-                        self.deep_prompt_embeddings_2[task] = nn.Parameter(emb2)
-                        self.deep_prompt_embeddings_3[task] = nn.Parameter(emb3)
+                        self.deep_prompt_embeddings_0["shared"] = nn.Parameter(emb0)
+                        self.deep_prompt_embeddings_1["shared"] = nn.Parameter(emb1)
+                        self.deep_prompt_embeddings_2["shared"] = nn.Parameter(emb2)
+                        self.deep_prompt_embeddings_3["shared"] = nn.Parameter(emb3)
+                    else:
+                        for task in tasks:
+                            emb0 = torch.zeros(depths[0] - 1, num_tokens, embed_dim)
+                            emb1 = torch.zeros(depths[1], num_tokens, embed_dim * 2)
+                            emb2 = torch.zeros(depths[2], num_tokens, embed_dim * 4)
+                            emb3 = torch.zeros(depths[3], num_tokens, embed_dim * 8)
+                            nn.init.uniform_(emb0, -val, val)
+                            nn.init.uniform_(emb1, -val, val)
+                            nn.init.uniform_(emb2, -val, val)
+                            nn.init.uniform_(emb3, -val, val)
+                            self.deep_prompt_embeddings_0[task] = nn.Parameter(emb0)
+                            self.deep_prompt_embeddings_1[task] = nn.Parameter(emb1)
+                            self.deep_prompt_embeddings_2[task] = nn.Parameter(emb2)
+                            self.deep_prompt_embeddings_3[task] = nn.Parameter(emb3)
         else:
             raise ValueError("Other initiation scheme is not supported")
 
@@ -212,30 +245,30 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
         if self.prompt_config.LOCATION == "prepend":
             x = self.get_patch_embeddings(x)
             prompt_embd = self.prompt_dropout(
-                self.prompt_embeddings[task].expand(B, -1, -1)
+                self._select_prompt(self.prompt_embeddings, task).expand(B, -1, -1)
             )
             x = torch.cat((prompt_embd, x), dim=1)
 
         elif self.prompt_config.LOCATION == "add":
             x = self.get_patch_embeddings(x)
             x = x + self.prompt_dropout(
-                self.prompt_embeddings[task].expand(B, -1, -1)
+                self._select_prompt(self.prompt_embeddings, task).expand(B, -1, -1)
             )
 
         elif self.prompt_config.LOCATION == "add-1":
             x = self.get_patch_embeddings(x)
             L = x.shape[1]
             prompt_emb = self.prompt_dropout(
-                self.prompt_embeddings[task].expand(B, -1, -1)
+                self._select_prompt(self.prompt_embeddings, task).expand(B, -1, -1)
             )
             x = x + prompt_emb.expand(-1, L, -1)
 
         elif self.prompt_config.LOCATION == "pad":
             prompt_emb_lr = self.prompt_norm(
-                self.prompt_embeddings_lr[task]
+                self._select_prompt(self.prompt_embeddings_lr, task)
             ).expand(B, -1, -1, -1)
             prompt_emb_tb = self.prompt_norm(
-                self.prompt_embeddings_tb[task]
+                self._select_prompt(self.prompt_embeddings_tb, task)
             ).expand(B, -1, -1, -1)
             x = torch.cat(
                 (
@@ -259,7 +292,7 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
             x = torch.cat(
                 (
                     x,
-                    self.prompt_norm(self.prompt_embeddings[task]).expand(
+                    self.prompt_norm(self._select_prompt(self.prompt_embeddings, task)).expand(
                         B, -1, -1, -1
                     ),
                 ),
@@ -277,6 +310,10 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
         return x
+
+    def _select_prompt(self, prompt_dict, task):
+        key = "shared" if self.share_task_prompt else task
+        return prompt_dict[key]
 
     def train(self, mode=True):
         if mode and not getattr(self.mtlora, "ENABLED", False):
@@ -302,7 +339,9 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
                         self.deep_prompt_embeddings_3,
                     ],
             ):
-                deep_prompt_embd = self.prompt_dropout(deep_prompt_embd_dict[task])
+                deep_prompt_embd = self.prompt_dropout(
+                    self._select_prompt(deep_prompt_embd_dict, task)
+                )
                 x = layer(x, task, deep_prompt_embd)
                 if return_stages:
                     feats.append(x[:, self.num_tokens:, :])

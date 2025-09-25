@@ -225,7 +225,12 @@ class MultiTaskSwin(nn.Module):
             shared_ft = {}
             for task in self.tasks:
                 features = self.backbone(x, task=task, return_stages=True)
-                shared_ft[task] = self.downsampler[task](features) if self.mtlora.ENABLED else self.downsampler(features)
+                downsampler = (
+                    self.downsampler[task]
+                    if isinstance(self.downsampler, nn.ModuleDict)
+                    else self.downsampler
+                )
+                shared_ft[task] = downsampler(features)
         else:
             shared_representation = self.backbone(x, return_stages=True)
 

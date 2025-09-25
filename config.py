@@ -182,6 +182,7 @@ _C.MODEL.PROMPT.DROPOUT = 0.0
 _C.MODEL.PROMPT.LOCATION = 'prepend'
 _C.MODEL.PROMPT.PROJECT = -1
 _C.MODEL.PROMPT.INITIATION = 'random'
+_C.MODEL.PROMPT.SHARE_TASK_PROMPT = False
 
 # -----------------------------------------------------------------------------
 # Training settings
@@ -205,6 +206,10 @@ _C.TRAIN.ACCUMULATION_STEPS = 1
 # Whether to use gradient checkpointing to save memory
 # could be overwritten by command line argument
 _C.TRAIN.USE_CHECKPOINT = False
+# Enable computing conflict gradient ratio (CR)
+_C.TRAIN.ENABLE_CONFLICT_RATIO = False
+# Number of batches between conflict ratio evaluations when enabled
+_C.TRAIN.CONFLICT_RATIO_PERIOD = 50
 
 # LR scheduler
 _C.TRAIN.LR_SCHEDULER = CN()
