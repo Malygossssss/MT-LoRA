@@ -6,6 +6,7 @@ import math
 import logging
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision as tv
 
 from functools import reduce
@@ -116,6 +117,11 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
         self.tasks = tasks
         self.mtlora = mtlora
         self.share_task_prompt = getattr(self.prompt_config, "SHARE_TASK_PROMPT", False)
+        self.prompt_keys = ["shared"] if self.share_task_prompt else list(tasks)
+        self.task_to_idx = {task: idx for idx, task in enumerate(tasks)}
+        self.num_base_prompts = len(self.prompt_keys)
+        self.num_tasks = len(tasks)
+        self.use_dynamic_prompts = False
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
         if self.prompt_config.LOCATION == "add":
@@ -195,37 +201,70 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
                         self.prompt_embeddings[task] = nn.Parameter(emb)
 
                 if self.prompt_config.DEEP:
-                    self.deep_prompt_embeddings_0 = nn.ParameterDict()
-                    self.deep_prompt_embeddings_1 = nn.ParameterDict()
-                    self.deep_prompt_embeddings_2 = nn.ParameterDict()
-                    self.deep_prompt_embeddings_3 = nn.ParameterDict()
-                    if self.share_task_prompt:
-                        emb0 = torch.zeros(depths[0] - 1, num_tokens, embed_dim)
-                        emb1 = torch.zeros(depths[1], num_tokens, embed_dim * 2)
-                        emb2 = torch.zeros(depths[2], num_tokens, embed_dim * 4)
-                        emb3 = torch.zeros(depths[3], num_tokens, embed_dim * 8)
-                        nn.init.uniform_(emb0, -val, val)
-                        nn.init.uniform_(emb1, -val, val)
-                        nn.init.uniform_(emb2, -val, val)
-                        nn.init.uniform_(emb3, -val, val)
-                        self.deep_prompt_embeddings_0["shared"] = nn.Parameter(emb0)
-                        self.deep_prompt_embeddings_1["shared"] = nn.Parameter(emb1)
-                        self.deep_prompt_embeddings_2["shared"] = nn.Parameter(emb2)
-                        self.deep_prompt_embeddings_3["shared"] = nn.Parameter(emb3)
+                    self.use_dynamic_prompts = getattr(
+                        self.prompt_config, "DYNAMIC_PROMPT", False
+                    )
+                    if self.use_dynamic_prompts and self.share_task_prompt:
+                        raise ValueError(
+                            "Dynamic prompts require individual task prompts."
+                        )
+
+                    if self.use_dynamic_prompts:
+                        self.deep_prompt_pools = nn.ParameterList()
+                        self.deep_prompt_gates = nn.ParameterList()
+                        for layer_idx, depth in enumerate(depths):
+                            stage_dim = embed_dim * (2 ** layer_idx)
+                            prompt_pool = torch.zeros(
+                                self.num_tasks, num_tokens, stage_dim
+                            )
+                            nn.init.uniform_(prompt_pool, -val, val)
+                            self.deep_prompt_pools.append(nn.Parameter(prompt_pool))
+
+                            if self.prompt_config.LOCATION == "prepend" and layer_idx == 0:
+                                num_prompt_blocks = max(depth - 1, 0)
+                            else:
+                                num_prompt_blocks = depth
+
+                            gate_shape = (
+                                num_prompt_blocks,
+                                self.num_tasks,
+                                self.num_tasks,
+                                num_tokens,
+                            )
+                            gate_param = torch.zeros(gate_shape)
+                            if num_prompt_blocks > 0:
+                                eye = torch.eye(self.num_tasks).unsqueeze(0).unsqueeze(-1)
+                                gate_param.copy_(
+                                    eye.repeat(num_prompt_blocks, 1, 1, num_tokens)
+                                )
+                            self.deep_prompt_gates.append(nn.Parameter(gate_param))
                     else:
-                        for task in tasks:
-                            emb0 = torch.zeros(depths[0] - 1, num_tokens, embed_dim)
-                            emb1 = torch.zeros(depths[1], num_tokens, embed_dim * 2)
-                            emb2 = torch.zeros(depths[2], num_tokens, embed_dim * 4)
-                            emb3 = torch.zeros(depths[3], num_tokens, embed_dim * 8)
-                            nn.init.uniform_(emb0, -val, val)
-                            nn.init.uniform_(emb1, -val, val)
-                            nn.init.uniform_(emb2, -val, val)
-                            nn.init.uniform_(emb3, -val, val)
-                            self.deep_prompt_embeddings_0[task] = nn.Parameter(emb0)
-                            self.deep_prompt_embeddings_1[task] = nn.Parameter(emb1)
-                            self.deep_prompt_embeddings_2[task] = nn.Parameter(emb2)
-                            self.deep_prompt_embeddings_3[task] = nn.Parameter(emb3)
+                        self.deep_prompt_embeddings = nn.ModuleList()
+                        for layer_idx, depth in enumerate(depths):
+                            stage_dim = embed_dim * (2 ** layer_idx)
+                            if (
+                                self.prompt_config.LOCATION == "prepend"
+                                and layer_idx == 0
+                            ):
+                                num_prompt_blocks = max(depth - 1, 0)
+                            else:
+                                num_prompt_blocks = depth
+
+                            prompt_dict = nn.ParameterDict()
+                            if self.share_task_prompt:
+                                emb = torch.zeros(
+                                    num_prompt_blocks, num_tokens, stage_dim
+                                )
+                                nn.init.uniform_(emb, -val, val)
+                                prompt_dict["shared"] = nn.Parameter(emb)
+                            else:
+                                for task in tasks:
+                                    emb = torch.zeros(
+                                        num_prompt_blocks, num_tokens, stage_dim
+                                    )
+                                    nn.init.uniform_(emb, -val, val)
+                                    prompt_dict[task] = nn.Parameter(emb)
+                            self.deep_prompt_embeddings.append(prompt_dict)
         else:
             raise ValueError("Other initiation scheme is not supported")
 
@@ -304,6 +343,18 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
 
         return x
 
+    def _compose_dynamic_prompt(self, layer_idx, task):
+        pool = self.deep_prompt_pools[layer_idx]
+        gates = self.deep_prompt_gates[layer_idx]
+
+        if gates.shape[0] == 0:
+            return pool.new_zeros((0, pool.shape[1], pool.shape[2]))
+
+        task_idx = self.task_to_idx[task]
+        weights = F.softmax(gates[:, task_idx, :, :], dim=1)
+        composed = torch.einsum("bsp,spd->bpd", weights, pool)
+        return composed
+
     def get_patch_embeddings(self, x):
         x = self.patch_embed(x)
         if self.ape:
@@ -330,18 +381,17 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
 
         feats = []
         if self.prompt_config.LOCATION == "prepend" and self.prompt_config.DEEP:
-            for layer, deep_prompt_embd_dict in zip(
-                    self.layers,
-                    [
-                        self.deep_prompt_embeddings_0,
-                        self.deep_prompt_embeddings_1,
-                        self.deep_prompt_embeddings_2,
-                        self.deep_prompt_embeddings_3,
-                    ],
-            ):
-                deep_prompt_embd = self.prompt_dropout(
-                    self._select_prompt(deep_prompt_embd_dict, task)
-                )
+            for layer_idx, layer in enumerate(self.layers):
+                if getattr(self, "use_dynamic_prompts", False):
+                    deep_prompt_embd = self.prompt_dropout(
+                        self._compose_dynamic_prompt(layer_idx, task)
+                    )
+                else:
+                    deep_prompt_embd = self.prompt_dropout(
+                        self._select_prompt(
+                            self.deep_prompt_embeddings[layer_idx], task
+                        )
+                    )
                 x = layer(x, task, deep_prompt_embd)
                 if return_stages:
                     feats.append(x[:, self.num_tokens:, :])

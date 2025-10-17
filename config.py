@@ -182,6 +182,7 @@ _C.MODEL.PROMPT.DROPOUT = 0.0
 _C.MODEL.PROMPT.LOCATION = 'prepend'
 _C.MODEL.PROMPT.PROJECT = -1
 _C.MODEL.PROMPT.INITIATION = 'random'
+_C.MODEL.PROMPT.DYNAMIC_PROMPT = False
 _C.MODEL.PROMPT.SHARE_TASK_PROMPT = False
 
 # -----------------------------------------------------------------------------
