@@ -41,8 +41,8 @@ MODEL:
     DEEP: True
     DROPOUT: 0.0
     DYNAMIC_PROMPT: True
-    DEEP_PROMPT_POOL_SIZE: 8
-    # DEEP_PROMPT_POOL_SIZES: [8, 12, 16, 24]
+    DEEP_PROMPT_POOL_SIZE: 4
+    DEEP_PROMPT_POOL_SIZES: [8, 12, 16, 24]
   DECODER_HEAD:
     semseg: hrnet
     normals: hrnet
