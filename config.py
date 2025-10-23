@@ -184,6 +184,8 @@ _C.MODEL.PROMPT.PROJECT = -1
 _C.MODEL.PROMPT.INITIATION = 'random'
 _C.MODEL.PROMPT.DYNAMIC_PROMPT = False
 _C.MODEL.PROMPT.SHARE_TASK_PROMPT = False
+_C.MODEL.PROMPT.DEEP_PROMPT_POOL_SIZE = 0
+_C.MODEL.PROMPT.DEEP_PROMPT_POOL_SIZES = []
 
 # -----------------------------------------------------------------------------
 # Training settings

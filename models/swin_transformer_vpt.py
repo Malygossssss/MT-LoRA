@@ -131,6 +131,25 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
         else:
             num_tokens = self.prompt_config.NUM_TOKENS
         self.num_tokens = num_tokens
+        pool_size_cfg = getattr(self.prompt_config, "DEEP_PROMPT_POOL_SIZE", 0)
+        default_pool_size = (
+            pool_size_cfg if pool_size_cfg and pool_size_cfg > 0 else self.num_tokens
+        )
+        stage_pool_sizes_cfg = getattr(self.prompt_config, "DEEP_PROMPT_POOL_SIZES", None)
+        if stage_pool_sizes_cfg:
+            if len(stage_pool_sizes_cfg) != self.num_layers:
+                raise ValueError(
+                    "DEEP_PROMPT_POOL_SIZES must have one entry per Swin stage"
+                )
+            self.prompt_pool_sizes = []
+            for size in stage_pool_sizes_cfg:
+                stage_size = int(size) if size is not None else 0
+                if stage_size <= 0:
+                    stage_size = default_pool_size
+                self.prompt_pool_sizes.append(stage_size)
+        else:
+            self.prompt_pool_sizes = [default_pool_size for _ in range(self.num_layers)]
+        self.prompt_pool_size = default_pool_size
 
         self.prompt_dropout = Dropout(self.prompt_config.DROPOUT)
         if self.prompt_config.PROJECT > -1:
@@ -214,28 +233,48 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
                         self.deep_prompt_gates = nn.ParameterList()
                         for layer_idx, depth in enumerate(depths):
                             stage_dim = embed_dim * (2 ** layer_idx)
-                            prompt_pool = torch.zeros(
-                                self.num_tasks, num_tokens, stage_dim
-                            )
-                            nn.init.uniform_(prompt_pool, -val, val)
-                            self.deep_prompt_pools.append(nn.Parameter(prompt_pool))
+                            stage_pool_size = self.prompt_pool_sizes[layer_idx]
 
-                            if self.prompt_config.LOCATION == "prepend" and layer_idx == 0:
+                            if (
+                                self.prompt_config.LOCATION == "prepend"
+                                and layer_idx == 0
+                            ):
                                 num_prompt_blocks = max(depth - 1, 0)
                             else:
                                 num_prompt_blocks = depth
 
+                            pool_shape = (
+                                num_prompt_blocks,
+                                stage_pool_size,
+                                stage_dim,
+                            )
+                            prompt_pool = torch.zeros(pool_shape)
+                            if prompt_pool.numel() > 0:
+                                nn.init.uniform_(prompt_pool, -val, val)
+                            self.deep_prompt_pools.append(nn.Parameter(prompt_pool))
+
                             gate_shape = (
                                 num_prompt_blocks,
                                 self.num_tasks,
-                                self.num_tasks,
                                 num_tokens,
+                                stage_pool_size,
                             )
                             gate_param = torch.zeros(gate_shape)
-                            if num_prompt_blocks > 0:
-                                eye = torch.eye(self.num_tasks).unsqueeze(0).unsqueeze(-1)
+                            if (
+                                num_prompt_blocks > 0
+                                and stage_pool_size > 0
+                                and num_tokens > 0
+                            ):
+                                base = torch.zeros(
+                                    self.num_tasks, num_tokens, stage_pool_size
+                                )
+                                for task_idx in range(self.num_tasks):
+                                    for token_idx in range(num_tokens):
+                                        pool_idx = (token_idx + task_idx) % stage_pool_size
+                                        base[task_idx, token_idx, pool_idx] = 1.0
+                                base = base.unsqueeze(0)
                                 gate_param.copy_(
-                                    eye.repeat(num_prompt_blocks, 1, 1, num_tokens)
+                                    base.repeat(num_prompt_blocks, 1, 1, 1)
                                 )
                             self.deep_prompt_gates.append(nn.Parameter(gate_param))
                     else:
@@ -347,12 +386,15 @@ class PromptedSwinTransformer(SwinTransformerMTLoRA):
         pool = self.deep_prompt_pools[layer_idx]
         gates = self.deep_prompt_gates[layer_idx]
 
-        if gates.shape[0] == 0:
-            return pool.new_zeros((0, pool.shape[1], pool.shape[2]))
+        num_prompt_blocks = gates.shape[0]
+        stage_dim = pool.shape[-1] if pool.ndim == 3 else 0
+
+        if num_prompt_blocks == 0 or pool.shape[1] == 0:
+            return pool.new_zeros((num_prompt_blocks, self.num_tokens, stage_dim))
 
         task_idx = self.task_to_idx[task]
-        weights = F.softmax(gates[:, task_idx, :, :], dim=1)
-        composed = torch.einsum("bsp,spd->bpd", weights, pool)
+        weights = F.softmax(gates[:, task_idx, :, :], dim=-1)
+        composed = torch.einsum("bts,bsd->btd", weights, pool)
         return composed
 
     def get_patch_embeddings(self, x):
