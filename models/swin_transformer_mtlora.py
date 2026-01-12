@@ -570,7 +570,7 @@ class BasicLayer(nn.Module):
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
-                 fused_window_process=False, tasks=None, mtlora=None, layer_idx=0):
+                 fused_window_process=False, tasks=None, mtlora=None, layer_idx=0, block_start_idx=0):
 
         super().__init__()
         self.dim = dim
@@ -578,6 +578,12 @@ class BasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.tasks = tasks
+
+        use_task_lora_blocks = (
+            mtlora is not None
+            and hasattr(mtlora, "TASK_LORA_BLOCKS")
+            and len(mtlora.TASK_LORA_BLOCKS) > 0
+        )
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -592,7 +598,11 @@ class BasicLayer(nn.Module):
                                      drop_path, list) else drop_path,
                                  norm_layer=norm_layer,
                                  fused_window_process=fused_window_process,
-                                 lora=(i == depth - 1),
+                                 lora=(
+                                     mtlora.TASK_LORA_BLOCKS[block_start_idx + i]
+                                     if use_task_lora_blocks
+                                     else (i == depth - 1)
+                                 ),
                                  tasks=tasks,
                                  mtlora=mtlora,
                                  layer_idx=layer_idx)
@@ -751,6 +761,7 @@ class SwinTransformerMTLoRA(nn.Module):
 
         # build layers
         self.layers = nn.ModuleList()
+        block_start_idx = 0
         for i_layer in range(self.num_layers):
             layer = basic_layer(dim=int(embed_dim * 2 ** i_layer),
                                 input_resolution=(patches_resolution[0] // (2 ** i_layer),
@@ -770,8 +781,10 @@ class SwinTransformerMTLoRA(nn.Module):
                                 fused_window_process=fused_window_process,
                                 tasks=tasks,
                                 mtlora=self.mtlora,
-                                layer_idx=i_layer)
+                                layer_idx=i_layer,
+                                block_start_idx=block_start_idx)
             self.layers.append(layer)
+            block_start_idx += depths[i_layer]
 
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.head = nn.Linear(

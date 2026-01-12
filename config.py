@@ -343,6 +343,7 @@ _C.MODEL.MTLORA.PROJ_ENABLED = True
 _C.MODEL.MTLORA.FC1_ENABLED = True
 _C.MODEL.MTLORA.FC2_ENABLED = True
 _C.MODEL.MTLORA.DOWNSAMPLER_ENABLED = False
+_C.MODEL.MTLORA.TASK_LORA_BLOCKS = []
 _C.MODEL.MTLORA.ADAPTIVE_START_RANK = 8
 _C.MODEL.MTLORA.ADAPTIVE_END_AVG_RANK = 8
 _C.MODEL.MTLORA.ADAPTIVE_START_PRUNE_STEP_RATIO = 0.15
@@ -502,6 +503,19 @@ def update_config(config, args):
 
     # Normalize MTLoRA config
     if config.MODEL.MTLORA.ENABLED:
+        total_blocks = sum(config.MODEL.SWIN.DEPTHS)
+        if config.MODEL.MTLORA.TASK_LORA_BLOCKS is None:
+            config.MODEL.MTLORA.TASK_LORA_BLOCKS = []
+        if not isinstance(config.MODEL.MTLORA.TASK_LORA_BLOCKS, list):
+            config.MODEL.MTLORA.TASK_LORA_BLOCKS = [
+                config.MODEL.MTLORA.TASK_LORA_BLOCKS]
+        if len(config.MODEL.MTLORA.TASK_LORA_BLOCKS) > 0:
+            assert len(config.MODEL.MTLORA.TASK_LORA_BLOCKS) == total_blocks, (
+                "MTLoRA task lora blocks length should be the same as the number of Swin blocks"
+            )
+            config.MODEL.MTLORA.TASK_LORA_BLOCKS = [
+                bool(flag) for flag in config.MODEL.MTLORA.TASK_LORA_BLOCKS
+            ]
         if not isinstance(config.MODEL.MTLORA.R, list):
             config.MODEL.MTLORA.R = [
                 config.MODEL.MTLORA.R] * len(config.MODEL.SWIN.DEPTHS)
