@@ -139,18 +139,21 @@ class MTDoRALinear(nn.Module):
 
     def forward(self, x: torch.Tensor, x_tasks: Optional[Dict[str, torch.Tensor]] = None):
         pretrained = self.linear(x)
-        if self.r_shared == 0:
+        if self.r_shared == 0 and self.tasks is None:
             return pretrained, None
 
-        shared_inp = self.lora_dropout(x)
-        shared = self.lora_shared_a(shared_inp)
-        shared = shared * self.lora_shared_scaler
-        shared = self.lora_shared_b(shared)
-        alpha = self.lora_shared_alpha
-        if isinstance(alpha, torch.Tensor):
-            shared = shared * (alpha / self.r_shared)
+        if self.r_shared > 0:
+            shared_inp = self.lora_dropout(x)
+            shared = self.lora_shared_a(shared_inp)
+            shared = shared * self.lora_shared_scaler
+            shared = self.lora_shared_b(shared)
+            alpha = self.lora_shared_alpha
+            if isinstance(alpha, torch.Tensor):
+                shared = shared * (alpha / self.r_shared)
+            else:
+                shared = shared * (alpha / self.r_shared)
         else:
-            shared = shared * (alpha / self.r_shared)
+            shared = 0
 
         if self.tasks is None:
             return pretrained + shared, None

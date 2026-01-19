@@ -2,7 +2,7 @@ DATA:
   IMG_SIZE: 448
 MODEL:
   TYPE: swin
-  NAME: mtlora_tiny_448_r64_scale4_pertask_r4_blockmask
+  NAME: mtlora_tiny_448_sharedr64_pure-ts-r16_blockmask
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
@@ -22,18 +22,19 @@ MODEL:
     FREEZE_PRETRAINED: True
     SPLIT_QKV: False
     QKV_ENABLED: True
+    QKV_TASK_LORA: True 
     PROJ_ENABLED: True
     FC1_ENABLED: True
     FC2_ENABLED: True
     DOWNSAMPLER_ENABLED: False
     R_PER_TASK:
-      semseg: [4]
-      normals: [4]
-      sal: [4]
-      human_parts: [4]
+      semseg: [16]
+      normals: [16]
+      sal: [16]
+      human_parts: [16]
       edge: [0]
       depth: [0]
-      shared: [64]
+      shared: [0]
   DECODER_HEAD:
     semseg: hrnet
     normals: hrnet
