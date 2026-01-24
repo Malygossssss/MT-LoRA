@@ -84,63 +84,169 @@ class NYUD_MT(data.Dataset):
         # Original Images
         self.im_ids = []
         self.images = []
-        _image_dir = os.path.join(root, 'images')
 
         # Edge Detection
         self.do_edge = do_edge
         self.edges = []
-        _edge_gt_dir = os.path.join(root, 'edge')
 
         # Semantic segmentation
         self.do_semseg = do_semseg
         self.semsegs = []
-        _semseg_gt_dir = os.path.join(root, 'segmentation')
 
         # Surface Normals
         self.do_normals = do_normals
         self.normals = []
-        _normal_gt_dir = os.path.join(root, 'normals')
 
         # Depth
         self.do_depth = do_depth
         self.depths = []
-        _depth_gt_dir = os.path.join(root, 'depth')
-
-        # train/val/test splits are pre-cut
-        _splits_dir = os.path.join(root, 'gt_sets')
-
+       
         print('Initializing dataloader for NYUD {} set'.format(''.join(self.split)))
-        for splt in self.split:
-            with open(os.path.join(os.path.join(_splits_dir, splt + '.txt')), 'r') as f:
-                lines = f.read().splitlines()
+        legacy_split_dir = os.path.join(root, 'gt_sets')
+        legacy_layout = os.path.isdir(legacy_split_dir)
 
-            for ii, line in enumerate(lines):
+        if legacy_layout:
+            _image_dir = os.path.join(root, 'images')
+            _edge_gt_dir = os.path.join(root, 'edge')
+            _semseg_gt_dir = os.path.join(root, 'segmentation')
+            _normal_gt_dir = os.path.join(root, 'normals')
+            _depth_gt_dir = os.path.join(root, 'depth')
 
-                # Images
-                _image = os.path.join(_image_dir, line + '.jpg')
-                assert os.path.isfile(_image)
-                self.images.append(_image)
-                self.im_ids.append(line.rstrip('\n'))
+            for splt in self.split:
+                with open(os.path.join(legacy_split_dir, splt + '.txt'), 'r') as f:
+                    lines = f.read().splitlines()
 
-                # Edges
-                _edge = os.path.join(_edge_gt_dir, line + '.npy')
-                assert os.path.isfile(_edge)
-                self.edges.append(_edge)
+                for line in lines:
+                    sample_id = line.rstrip('\n')
 
-                # Semantic Segmentation
-                _semseg = os.path.join(_semseg_gt_dir, line + '.png')
-                assert os.path.isfile(_semseg)
-                self.semsegs.append(_semseg)
+                    # Images
+                    _image = os.path.join(_image_dir, sample_id + '.jpg')
+                    assert os.path.isfile(_image)
+                    self.images.append(_image)
+                    self.im_ids.append(sample_id)
 
-                # Surface Normals
-                _normal = os.path.join(_normal_gt_dir, line + '.npy')
-                assert os.path.isfile(_normal)
-                self.normals.append(_normal)
+                    # Edges
+                    _edge = os.path.join(_edge_gt_dir, sample_id + '.npy')
+                    assert os.path.isfile(_edge)
+                    self.edges.append(_edge)
 
-                # Depth Prediction
-                _depth = os.path.join(_depth_gt_dir, line + '.npy')
-                assert os.path.isfile(_depth)
-                self.depths.append(_depth)
+                    # Semantic Segmentation
+                    _semseg = os.path.join(_semseg_gt_dir, sample_id + '.png')
+                    assert os.path.isfile(_semseg)
+                    self.semsegs.append(_semseg)
+
+                    # Surface Normals
+                    _normal = os.path.join(_normal_gt_dir, sample_id + '.npy')
+                    assert os.path.isfile(_normal)
+                    self.normals.append(_normal)
+
+                    # Depth Prediction
+                    _depth = os.path.join(_depth_gt_dir, sample_id + '.npy')
+                    assert os.path.isfile(_depth)
+                    self.depths.append(_depth)
+        else:
+            def _build_stem_map(dir_path, allowed_exts=None, preferred_exts=None):
+                stem_candidates = {}
+                if not os.path.isdir(dir_path):
+                    return {}
+
+                if allowed_exts is not None:
+                    allowed_exts = {ext.lower() for ext in allowed_exts}
+
+                for fname in sorted(os.listdir(dir_path)):
+                    fpath = os.path.join(dir_path, fname)
+                    if not os.path.isfile(fpath):
+                        continue
+                    stem, ext = os.path.splitext(fname)
+                    ext = ext.lower()
+                    if allowed_exts is not None and ext not in allowed_exts:
+                        continue
+                    stem_candidates.setdefault(stem, []).append(fname)
+
+                if not stem_candidates:
+                    return {}
+
+                preferred_order = {}
+                if preferred_exts is not None:
+                    preferred_order = {
+                        ext.lower(): i for i, ext in enumerate(preferred_exts)
+                    }
+                    default_rank = len(preferred_order)
+                else:
+                    default_rank = 0
+
+                stem_map = {}
+                for stem, files in stem_candidates.items():
+                    def _rank(fname):
+                        _, ext = os.path.splitext(fname)
+                        return (preferred_order.get(ext.lower(), default_rank), fname)
+
+                    stem_map[stem] = min(files, key=_rank)
+
+                return stem_map
+
+            for splt in self.split:
+                split_root = os.path.join(root, splt)
+                image_dir = os.path.join(split_root, 'image')
+                assert os.path.isdir(image_dir), \
+                    f"Expected NYUD split directory at {image_dir}"
+
+                image_map = _build_stem_map(
+                    image_dir,
+                    allowed_exts={'.jpg', '.jpeg', '.png', '.bmp', '.npy'},
+                    preferred_exts={'.jpg', '.jpeg', '.png', '.bmp', '.npy'},
+                )
+                assert image_map, f"No images found under {image_dir}"
+
+                depth_map = _build_stem_map(
+                    os.path.join(split_root, 'depth'),
+                    allowed_exts={'.npy', '.png', '.jpg', '.jpeg'},
+                    preferred_exts={'.npy', '.png', '.jpg', '.jpeg'},
+                )
+                normal_map = _build_stem_map(
+                    os.path.join(split_root, 'normal'),
+                    allowed_exts={'.npy', '.png', '.jpg', '.jpeg'},
+                    preferred_exts={'.npy', '.png', '.jpg', '.jpeg'},
+                )
+                semseg_map = _build_stem_map(
+                    os.path.join(split_root, 'label'),
+                    allowed_exts={'.png', '.npy'},
+                    preferred_exts={'.png', '.npy'},
+                )
+                edge_map = _build_stem_map(
+                    os.path.join(split_root, 'edge'),
+                    allowed_exts={'.npy', '.png'},
+                    preferred_exts={'.npy', '.png'},
+                )
+
+                for sample_id in sorted(image_map.keys()):
+                    # Images
+                    self.images.append(os.path.join(image_dir, image_map[sample_id]))
+                    self.im_ids.append(sample_id)
+
+                    # Edges (optional in this layout)
+                    if self.do_edge:
+                        assert sample_id in edge_map, \
+                            f"Missing edge label for {sample_id} in split {splt}"
+                        self.edges.append(os.path.join(split_root, 'edge', edge_map[sample_id]))
+
+                    # Semantic Segmentation
+                    if self.do_semseg:
+                        assert sample_id in semseg_map, \
+                            f"Missing semseg label for {sample_id} in split {splt}"
+                        self.semsegs.append(os.path.join(split_root, 'label', semseg_map[sample_id]))
+
+                    # Surface Normals
+                    if self.do_normals:
+                        assert sample_id in normal_map, \
+                            f"Missing normal label for {sample_id} in split {splt}"
+                        self.normals.append(os.path.join(split_root, 'normal', normal_map[sample_id]))
+
+                    # Depth Prediction
+                    if self.do_depth:
+                        assert sample_id in depth_map, \
+                            f"Missing depth label for {sample_id} in split {splt}"
+                        self.depths.append(os.path.join(split_root, 'depth', depth_map[sample_id]))
 
         if self.do_edge:
             assert (len(self.images) == len(self.edges))
@@ -209,8 +315,21 @@ class NYUD_MT(data.Dataset):
         return len(self.images)
 
     def _load_img(self, index):
-        _img = np.array(Image.open(self.images[index]).convert(
-            'RGB')).astype(float)
+        img_path = self.images[index]
+        _, ext = os.path.splitext(img_path)
+        ext = ext.lower()
+        if ext == '.npy':
+            _img = np.load(img_path)
+            if _img.ndim == 2:
+                _img = np.stack([_img] * 3, axis=-1)
+            elif _img.ndim == 3 and _img.shape[2] == 1:
+                _img = np.repeat(_img, 3, axis=2)
+            assert _img.ndim == 3 and _img.shape[2] == 3, \
+                f"NYUD image npy must have shape HxWx3, got {_img.shape} at {img_path}"
+            _img = _img.astype(float)
+        else:
+            _img = np.array(Image.open(img_path).convert(
+                'RGB')).astype(float)
         return _img
 
     def _load_edge(self, index):
@@ -219,7 +338,18 @@ class NYUD_MT(data.Dataset):
 
     def _load_semseg(self, index):
         # Note: We ignore the background class as other related works.
-        _semseg = np.array(Image.open(self.semsegs[index])).astype(float)
+        semseg_path = self.semsegs[index]
+        _, ext = os.path.splitext(semseg_path)
+        ext = ext.lower()
+        if ext == '.npy':
+            _semseg = np.load(semseg_path)
+            if _semseg.ndim == 3 and _semseg.shape[2] == 1:
+                _semseg = np.squeeze(_semseg, axis=2)
+            assert _semseg.ndim == 2, \
+                f"NYUD semseg npy must have shape HxW, got {_semseg.shape} at {semseg_path}"
+            _semseg = _semseg.astype(float)
+        else:
+            _semseg = np.array(Image.open(semseg_path)).astype(float)
         _semseg[_semseg == 0] = 256
         _semseg = _semseg - 1
         return _semseg
