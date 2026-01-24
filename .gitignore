@@ -143,3 +143,14 @@ output/
 *.ptl
 *.dec
 wandb/*
+
+*.zip
+
+NYUV2/train/depth/*
+NYUV2/train/image/*
+NYUV2/train/label/*
+NYUV2/train/normal/*
+NYUV2/val/depth/*
+NYUV2/val/image/*
+NYUV2/val/label/*
+NYUV2/val/normal/*

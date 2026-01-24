@@ -31,7 +31,7 @@ _C.BASE = ['']
 # -----------------------------------------------------------------------------
 _C.DATA = CN()
 # Batch size for a single GPU, could be overwritten by command line argument
-_C.DATA.BATCH_SIZE = 128
+_C.DATA.BATCH_SIZE = 32
 # Path to dataset, could be overwritten by command line argument
 _C.DATA.DATA_PATH = ''
 # Dataset name
@@ -337,7 +337,7 @@ _C.MODEL.MTLORA.FREEZE_PRETRAINED = True
 _C.MODEL.MTLORA.SPLIT_QKV = False
 _C.MODEL.MTLORA.R_PER_TASK = CN(new_allowed=True)
 _C.MODEL.MTLORA.SCALE_PER_TASK = CN(new_allowed=True)
-_C.MODEL.MTLORA.SHARED_MODE = 'matrix'  # 'matrix', 'addition', lora_only
+_C.MODEL.MTLORA.SHARED_MODE = 'matrix'  # 'matrix', 'addition', 'task_vector', lora_only
 _C.MODEL.MTLORA.QKV_ENABLED = True
 _C.MODEL.MTLORA.QKV_TASK_LORA = False
 _C.MODEL.MTLORA.PROJ_ENABLED = True

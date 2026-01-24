@@ -175,7 +175,7 @@ class MTLoRALinear(LoRALayer):
         **kwargs,
     ):
         assert shared_mode in ['matrix', 'matrixv2',
-                               'add', 'addition', 'lora_only']
+                               'add', 'addition', 'lora_only', 'task_vector']
         if shared_mode == 'add':
             shared_mode = 'addition'
         if shared_mode == 'lora_only':
@@ -197,29 +197,39 @@ class MTLoRALinear(LoRALayer):
         self.has_tasks = has_tasks
         self.shared_mode = shared_mode
         if has_tasks:
-            self.lora_tasks_A = nn.ParameterDict({
-                task: nn.Parameter(
-                    self.linear.weight.new_zeros((r[task], in_features)))
-                for task in tasks
-            })
-            self.lora_tasks_B = nn.ParameterDict({
-                task: nn.Parameter(
-                    self.linear.weight.new_zeros((out_features, r[task])))
-                for task in tasks
-            })
-            if trainable_scale_per_task:
-                self.lora_task_scale = nn.ParameterDict({
-                    task: nn.Parameter(torch.FloatTensor(
-                        [lora_task_scale]))
+            if self.shared_mode == 'task_vector':
+                if r['shared'] <= 0:
+                    raise ValueError(
+                        "task_vector mode requires shared rank > 0.")
+                self.lora_task_vector = nn.ParameterDict({
+                    task: nn.Parameter(torch.ones(
+                        r['shared'], dtype=self.linear.weight.dtype))
                     for task in tasks
                 })
             else:
-                self.lora_task_scale = {task: lora_task_scale[task]
-                                        for task in tasks}
-            if self.shared_mode == 'addition':
-                self.lora_norm = nn.LayerNorm(out_features)
+                self.lora_tasks_A = nn.ParameterDict({
+                    task: nn.Parameter(
+                        self.linear.weight.new_zeros((r[task], in_features)))
+                    for task in tasks
+                })
+                self.lora_tasks_B = nn.ParameterDict({
+                    task: nn.Parameter(
+                        self.linear.weight.new_zeros((out_features, r[task])))
+                    for task in tasks
+                })
+                if trainable_scale_per_task:
+                    self.lora_task_scale = nn.ParameterDict({
+                        task: nn.Parameter(torch.FloatTensor(
+                            [lora_task_scale]))
+                        for task in tasks
+                    })
+                else:
+                    self.lora_task_scale = {task: lora_task_scale[task]
+                                            for task in tasks}
+                if self.shared_mode == 'addition':
+                    self.lora_norm = nn.LayerNorm(out_features)
         if r['shared'] > 0:
-            if self.shared_mode == 'matrix' or self.shared_mode == 'matrixv2':
+            if self.shared_mode in ['matrix', 'matrixv2', 'task_vector']:
                 self.lora_shared_A = nn.Parameter(
                     self.linear.weight.new_zeros((r['shared'], in_features)))
                 self.lora_shared_B = nn.Parameter(
@@ -290,6 +300,20 @@ class MTLoRALinear(LoRALayer):
             else:
                 lora = self.lora_norm(torch.sum(torch.stack(
                     list(lora_tasks.values()), dim=0), dim=0))
+        elif self.shared_mode == 'task_vector':
+            if self.r > 0:
+                lora = ((x @ self.lora_shared_A.transpose(0, 1))
+                        @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+            else:
+                lora = 0
+            lora_tasks = {
+                task: pretrained + (((x if x_tasks is None else x_tasks[task]) @ self.lora_shared_A.transpose(0, 1)
+                                     * self.lora_task_vector[task]) @ self.lora_shared_B.transpose(
+                    0, 1)) * self.lora_shared_scale
+                for task in self.tasks
+            } if self.tasks is not None else None
+        else:
+            raise NotImplementedError
 
         return pretrained + lora, lora_tasks
 
