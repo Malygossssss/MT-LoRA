@@ -350,6 +350,11 @@ class NYUD_MT(data.Dataset):
             _semseg = _semseg.astype(float)
         else:
             _semseg = np.array(Image.open(semseg_path)).astype(float)
+        # Harmonize ignore regions across NYUD variants:
+        # - background 0 is ignored in this setup
+        # - some datasets use -1 (or 255) for ignore
+        ignore_mask = (_semseg < 0) | (_semseg == 255)
+        _semseg[ignore_mask] = 256
         _semseg[_semseg == 0] = 256
         _semseg = _semseg - 1
         return _semseg
