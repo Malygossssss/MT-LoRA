@@ -91,7 +91,7 @@ class SemsegMeter(object):
             has_bg = True
             ignore_index = 255
         elif database == 'NYUD':
-            n_classes = 40
+            n_classes = 13
             cat_names = NYU_CATEGORY_NAMES
             has_bg = False
             ignore_index = 255
@@ -162,7 +162,7 @@ def eval_semseg_predictions(database, save_dir, overfit=False):
 
     elif database == 'NYUD':
         from data.nyud import NYUD_MT
-        n_classes = 40
+        n_classes = 13
         cat_names = NYU_CATEGORY_NAMES
         has_bg = False
         gt_set = 'val'

@@ -337,7 +337,6 @@ class NYUD_MT(data.Dataset):
         return _edge
 
     def _load_semseg(self, index):
-        # Note: We ignore the background class as other related works.
         semseg_path = self.semsegs[index]
         _, ext = os.path.splitext(semseg_path)
         ext = ext.lower()
@@ -351,12 +350,9 @@ class NYUD_MT(data.Dataset):
         else:
             _semseg = np.array(Image.open(semseg_path)).astype(float)
         # Harmonize ignore regions across NYUD variants:
-        # - background 0 is ignored in this setup
         # - some datasets use -1 (or 255) for ignore
         ignore_mask = (_semseg < 0) | (_semseg == 255)
-        _semseg[ignore_mask] = 256
-        _semseg[_semseg == 0] = 256
-        _semseg = _semseg - 1
+        _semseg[ignore_mask] = 255
         return _semseg
 
     def _load_depth(self, index):
@@ -877,7 +873,7 @@ def get_tasks_config(db_name, task_list, img_size):
         if db_name == 'PASCALContext':
             task_cfg.NUM_OUTPUT[tmp] = 21
         elif db_name == 'NYUD':
-            task_cfg.NUM_OUTPUT[tmp] = 40
+            task_cfg.NUM_OUTPUT[tmp] = 13
         else:
             raise NotImplementedError
         task_cfg.FLAGVALS[tmp] = cv2.INTER_NEAREST
