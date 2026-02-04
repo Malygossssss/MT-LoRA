@@ -19,6 +19,7 @@ import json
 import random
 import argparse
 import datetime
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -41,6 +42,8 @@ from mtl_loss_schemes import MultiTaskLoss, get_loss
 from evaluation.evaluate_utils import PerformanceMeter, get_output
 from ptflops import get_model_complexity_info
 from models.lora import mark_only_lora_as_trainable
+from models.dora_mtlora import prune_lora_scaler as dora_prune_lora_scaler
+from models.dora_mtlora import regularization_loss as dora_regularization_loss
 
 try:
     import wandb
@@ -260,6 +263,15 @@ def main(config):
                                         freeze_norm=config.TRAIN.FREEZE_LAYER_NORM,
                                         free_relative_bias=config.TRAIN.FREEZE_RELATIVE_POSITION_BIAS,
                                         freeze_downsample_reduction=True if config.MODEL.MTLORA.DOWNSAMPLER_ENABLED else config.TRAIN.FREEZE_DOWNSAMPLE_REDUCTION)
+            if config.MODEL.PROMPT.ENABLED:
+                for name, param in model.backbone.named_parameters():
+                    if (
+                        "prompt_embeddings" in name
+                        or "deep_prompt_embeddings" in name
+                        or "deep_prompt_pools" in name
+                        or "deep_prompt_gates" in name
+                    ):
+                        param.requires_grad = True
         else:
             print("Marking all layers as trainable")
     if config.MODEL.FREEZE_BACKBONE:
@@ -286,13 +298,24 @@ def main(config):
     logger.info("Start training")
     start_time = time.perf_counter()
 
+    record_cr_values = config.TRAIN.ENABLE_CONFLICT_RATIO and dist.get_rank() == 0
+    all_batch_cr_records = [] if record_cr_values else None
+    total_cr_sum = 0.0
+    total_cr_count = 0.0
+
     epoch = 0
     for epoch in range(config.TRAIN.EPOCHS):
         if not config.MTL:
             data_loader_train.sampler.set_epoch(epoch)
 
-        train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
-                        loss_scaler, teacher=teacher)
+        epoch_cr_records, epoch_cr_sum, epoch_cr_count = train_one_epoch(config, model, criterion, data_loader_train,
+                                                                         optimizer, epoch, mixup_fn, lr_scheduler,
+                                                                         loss_scaler, teacher=teacher)
+        if config.TRAIN.ENABLE_CONFLICT_RATIO:
+            total_cr_sum += epoch_cr_sum
+            total_cr_count += epoch_cr_count
+            if record_cr_values and epoch_cr_records:
+                all_batch_cr_records.extend(epoch_cr_records)
         if dist.get_rank() == 0 and (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
             save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, loss_scaler,
                             logger)
@@ -303,11 +326,132 @@ def main(config):
                 acc1, _, _ = validate(config, data_loader_val, model, epoch)
                 max_accuracy = max(max_accuracy, acc1)
 
+    if config.TRAIN.ENABLE_CONFLICT_RATIO:
+        cr_device = next(model.parameters()).device
+        cr_tensor = torch.tensor([total_cr_sum, total_cr_count], dtype=torch.float64, device=cr_device)
+        if dist.is_initialized():
+            dist.all_reduce(cr_tensor, op=dist.ReduceOp.SUM)
+        total_count_value = cr_tensor[1].item()
+        global_avg_cr = (cr_tensor[0] / total_count_value).item() if total_count_value > 0 else 0.0
+        if dist.get_rank() == 0:
+            os.makedirs(config.OUTPUT, exist_ok=True)
+            cr_output_path = os.path.join(config.OUTPUT, "conflict_ratio.txt")
+            with open(cr_output_path, "w") as f:
+                if all_batch_cr_records:
+                    for record in all_batch_cr_records:
+                        f.write(
+                            f"epoch={record['epoch']}, batch={record['batch']}, global_step={record['global_step']}, cr={record['cr']:.6f}\n"
+                        )
+                else:
+                    f.write("# No conflict ratio values were recorded.\n")
+                f.write(f"global_average_cr: {global_avg_cr:.6f}\n")
+            logger.info(f"Conflict gradient ratio metrics saved to {cr_output_path}")
+
     # final eval
     validate(config, data_loader_val, model, epoch)
     total_time = time.perf_counter() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
+
+
+def _is_per_task_parameter(name, tasks):
+    for task in tasks:
+        if f".{task}." in name or name.endswith(f".{task}") or f".{task}_" in name or f"_{task}." in name:
+            return True
+    return False
+
+
+def _get_shared_parameters_for_cr(model, config):
+    tasks = set(config.TASKS) if hasattr(config, "TASKS") else set()
+    shared_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.startswith("decoders."):
+            continue
+        if name.startswith("downsampler."):
+            parts = name.split(".")
+            if len(parts) > 1 and parts[1] in tasks:
+                continue
+        if tasks and _is_per_task_parameter(name, tasks):
+            continue
+        shared_params.append(param)
+    return shared_params
+
+
+def _compute_conflict_ratio(loss_dict, shared_params, task_order, task_weights):
+    if loss_dict is None or not shared_params:
+        return 0.0
+
+    active_tasks = [task for task in task_order if task in loss_dict]
+    if not active_tasks:
+        return 0.0
+
+    task_losses = {
+        task: loss_dict[task] * float(task_weights.get(task, 1.0))
+        for task in active_tasks
+    }
+
+    if not task_losses:
+        return 0.0
+
+    # Accumulate total gradient across tasks and per-task norms
+    sum_total = [torch.zeros_like(param, dtype=torch.float32) for param in shared_params]
+    task_norm_sq = {task: 0.0 for task in task_losses}
+
+    for task, loss_value in task_losses.items():
+        grads = torch.autograd.grad(loss_value, shared_params, retain_graph=True, allow_unused=True)
+        norm_sq = 0.0
+        for idx, (grad, accum) in enumerate(zip(grads, sum_total)):
+            if grad is None:
+                continue
+            grad_detached = grad.detach()
+            if grad_detached.dtype != torch.float32:
+                grad_detached = grad_detached.float()
+            accum.add_(grad_detached)
+            norm_sq += torch.sum(grad_detached * grad_detached).item()
+        task_norm_sq[task] = norm_sq
+
+    sum_total_norm_sq = 0.0
+    for accum in sum_total:
+        sum_total_norm_sq += torch.sum(accum * accum).item()
+
+    task_dot_with_sum = {}
+    for task, loss_value in task_losses.items():
+        grads = torch.autograd.grad(loss_value, shared_params, retain_graph=True, allow_unused=True)
+        dot_val = 0.0
+        for grad, accum in zip(grads, sum_total):
+            if grad is None:
+                continue
+            grad_detached = grad.detach()
+            if grad_detached.dtype != torch.float32:
+                grad_detached = grad_detached.float()
+            dot_val += torch.sum(grad_detached * accum).item()
+        task_dot_with_sum[task] = dot_val
+
+    eps = 1e-12
+    ratios = []
+    for task in task_losses:
+        grad_norm_sq = task_norm_sq.get(task, 0.0)
+        if grad_norm_sq <= eps:
+            ratios.append(0.0)
+            continue
+        dot_val = task_dot_with_sum.get(task, 0.0) - grad_norm_sq
+        other_norm_sq = sum_total_norm_sq - grad_norm_sq - 2.0 * dot_val
+        if other_norm_sq <= eps:
+            ratios.append(0.0)
+            continue
+        proj_norm_sq = (dot_val ** 2) / (other_norm_sq + eps)
+        conflict_norm_sq = grad_norm_sq - proj_norm_sq
+        if conflict_norm_sq < 0.0:
+            conflict_norm_sq = 0.0
+        ratio = math.sqrt(conflict_norm_sq / (grad_norm_sq + eps))
+        ratios.append(ratio)
+
+    if not ratios:
+        return 0.0
+
+    return float(sum(ratios) / len(ratios))
 
 
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
@@ -326,7 +470,44 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     end = time.perf_counter()
     loss_dict = None
 
+    compute_cr = bool(config.MTL and config.TRAIN.ENABLE_CONFLICT_RATIO and hasattr(criterion, 'loss_weights'))
+    shared_params_for_cr = None
+    task_order_for_cr = list(config.TASKS) if compute_cr else []
+    task_weights_for_cr = {}
+    cr_records = [] if compute_cr and dist.get_rank() == 0 else None
+    cr_period = 1
+    if compute_cr:
+        period_value = getattr(config.TRAIN, 'CONFLICT_RATIO_PERIOD', 1)
+        try:
+            cr_period = int(period_value)
+        except (TypeError, ValueError):
+            cr_period = 1
+        if cr_period < 1:
+            cr_period = 1
+    cr_sum = 0.0
+    cr_count = 0.0
+
+    if compute_cr:
+        shared_params_for_cr = _get_shared_parameters_for_cr(model, config)
+        if not shared_params_for_cr:
+            compute_cr = False
+            if dist.get_rank() == 0:
+                logger.warning("Conflict ratio computation disabled because no shared parameters were found.")
+        else:
+            task_weights_for_cr = {
+                task: float(criterion.loss_weights.get(task, 1.0))
+                for task in task_order_for_cr if task in criterion.loss_weights
+            }
+            if not task_weights_for_cr:
+                compute_cr = False
+                if dist.get_rank() == 0:
+                    logger.warning("Conflict ratio computation disabled because no task weights were available.")
+            elif cr_records is not None:
+                cr_records = []
+
     for idx, batch in enumerate(data_loader):
+        global_step = epoch * num_steps + idx + 1
+        max_step = config.TRAIN.EPOCHS * num_steps
         if not config.MTL:
             samples, targets = batch
             samples = samples.cuda(non_blocking=True)
@@ -341,6 +522,25 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             outputs = model(samples)
             loss, loss_dict = criterion(outputs, targets)
+            if config.MODEL.MTLORA.ADAPTIVE:
+                reg = dora_regularization_loss(model, global_step, max_step, config.MODEL.MTLORA)
+                loss = loss + config.MODEL.MTLORA.REGULARIZATION_LOSS_ALPHA * reg
+
+        should_measure_cr = False
+        if compute_cr:
+            should_measure_cr = ((idx + 1) % cr_period == 0) or (idx == num_steps - 1)
+
+        if should_measure_cr:
+            batch_cr = _compute_conflict_ratio(loss_dict, shared_params_for_cr, task_order_for_cr, task_weights_for_cr)
+            cr_sum += batch_cr
+            cr_count += 1
+            if cr_records is not None:
+                cr_records.append({
+                    'epoch': epoch,
+                    'batch': idx,
+                    'global_step': global_step,
+                    'cr': batch_cr,
+                })
 
         is_second_order = hasattr(
             optimizer, 'is_second_order') and optimizer.is_second_order
@@ -351,6 +551,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             optimizer.zero_grad()
             lr_scheduler.step_update(
                 (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
+            if config.MODEL.MTLORA.ADAPTIVE:
+                dora_prune_lora_scaler(model, global_step, max_step, config.MODEL.MTLORA)
         loss_scale_value = loss_scaler.state_dict()["scale"]
 
         # torch.cuda.synchronize()
@@ -434,6 +636,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     epoch_time = time.perf_counter() - start
     logger.info(
         f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
+
+    return (cr_records if compute_cr else None, cr_sum if compute_cr else 0.0, cr_count if compute_cr else 0.0)
 
 
 @torch.no_grad()
@@ -595,7 +799,8 @@ if __name__ == '__main__':
     os.makedirs(config.OUTPUT, exist_ok=True)
     logger = create_logger(output_dir=config.OUTPUT,
                            dist_rank=dist.get_rank(), name=f"{config.MODEL.NAME}")
-
+    eval_logger = create_logger(output_dir=config.OUTPUT,
+                                dist_rank=dist.get_rank(), name="eval")
     if dist.get_rank() == 0:
         path = os.path.join(config.OUTPUT, "config.json")
         with open(path, "w") as f:

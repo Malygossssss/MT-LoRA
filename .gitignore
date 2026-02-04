@@ -137,7 +137,6 @@ output/
 
 *.out
 *.log
-*.csv
 *.png
 *.pth
 *.pt

@@ -147,7 +147,12 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger,
             print("No keys needs to be mapped for LoRA")
         model_state = map_old_state_dict_weights(
             model_state, mapping, "", config.MODEL.MTLORA.SPLIT_QKV)
-    missing, unexpected = model.load_state_dict(model_state, strict=False)
+    incompatible = model.load_state_dict(model_state, strict=False)
+    if isinstance(incompatible, tuple):
+        missing, unexpected = incompatible
+    else:
+        missing = getattr(incompatible, 'missing_keys', [])
+        unexpected = getattr(incompatible, 'unexpected_keys', [])
     if not quiet:
         if len(missing) > 0:
             logger.warning("=============Missing Keys==============")

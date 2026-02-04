@@ -173,6 +173,20 @@ _C.MODEL.DECODER_CHANNELS = [18, 36, 72, 144]
 
 _C.MODEL.SEGFORMER_CHANNELS = 256
 
+# Visual Prompt Tuning settings
+_C.MODEL.PROMPT = CN()
+_C.MODEL.PROMPT.ENABLED = False
+_C.MODEL.PROMPT.NUM_TOKENS = 0
+_C.MODEL.PROMPT.DEEP = False
+_C.MODEL.PROMPT.DROPOUT = 0.0
+_C.MODEL.PROMPT.LOCATION = 'prepend'
+_C.MODEL.PROMPT.PROJECT = -1
+_C.MODEL.PROMPT.INITIATION = 'random'
+_C.MODEL.PROMPT.DYNAMIC_PROMPT = False
+_C.MODEL.PROMPT.SHARE_TASK_PROMPT = False
+_C.MODEL.PROMPT.DEEP_PROMPT_POOL_SIZE = 0
+_C.MODEL.PROMPT.DEEP_PROMPT_POOL_SIZES = []
+
 # -----------------------------------------------------------------------------
 # Training settings
 # -----------------------------------------------------------------------------
@@ -195,6 +209,10 @@ _C.TRAIN.ACCUMULATION_STEPS = 1
 # Whether to use gradient checkpointing to save memory
 # could be overwritten by command line argument
 _C.TRAIN.USE_CHECKPOINT = False
+# Enable computing conflict gradient ratio (CR)
+_C.TRAIN.ENABLE_CONFLICT_RATIO = False
+# Number of batches between conflict ratio evaluations when enabled
+_C.TRAIN.CONFLICT_RATIO_PERIOD = 50
 
 # LR scheduler
 _C.TRAIN.LR_SCHEDULER = CN()
@@ -306,6 +324,7 @@ _C.MODEL.UPDATE_RELATIVE_POSITION = False
 
 _C.MODEL.MTLORA = CN()
 _C.MODEL.MTLORA.ENABLED = False
+_C.MODEL.MTLORA.ADAPTIVE = False
 _C.MODEL.MTLORA.BIAS = 'none'  # none, all, lora_only
 _C.MODEL.MTLORA.R = [8, 8, 8, 8]
 _C.MODEL.MTLORA.SHARED_SCALE = [2.0, 2.0, 2.0, 2.0]
@@ -324,6 +343,14 @@ _C.MODEL.MTLORA.PROJ_ENABLED = True
 _C.MODEL.MTLORA.FC1_ENABLED = True
 _C.MODEL.MTLORA.FC2_ENABLED = True
 _C.MODEL.MTLORA.DOWNSAMPLER_ENABLED = False
+_C.MODEL.MTLORA.ADAPTIVE_START_RANK = 8
+_C.MODEL.MTLORA.ADAPTIVE_END_AVG_RANK = 8
+_C.MODEL.MTLORA.ADAPTIVE_START_PRUNE_STEP_RATIO = 0.15
+_C.MODEL.MTLORA.ADAPTIVE_END_PRUNE_STEP_RATIO = 0.5
+_C.MODEL.MTLORA.ADAPTIVE_PRUNE_INTERVAL_STEP = 100
+_C.MODEL.MTLORA.ADAPTIVE_SENSITIVITY_BETA = 0.9
+_C.MODEL.MTLORA.ADAPTIVE_EPS = 1e-8
+_C.MODEL.MTLORA.REGULARIZATION_LOSS_ALPHA = 0.0
 
 
 def _update_config_from_file(config, cfg_file):

@@ -43,12 +43,12 @@ Running MTLoRA code, is very simmilar to Swin's codebase:
 5. **通过脚本计算Δm**
    ```python
    python compute_delta_m.py \
-   --log-file /sde/wyf/project/MTLoRA-main/output/mtlora_tiny_448_r64_scale4_pertask_cotodrop/default/log_rank0.txt \
+   --log-file /sde/wyf/project/MTLoRA-main/output/mtlora_vpt_tiny_448_r64_scale4_pertask/default/log_rank0.txt \
    --semseg-st 67.21 \
    --human-st 61.93 \
    --saliency-st 62.35 \
    --normals-st 17.97 \
-   --csv-out delta_m_history.csv
+   --csv-out csv/mtlora_vpt_delta_m_history.csv
    ```
   
 ## Authorship
