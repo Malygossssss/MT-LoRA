@@ -143,3 +143,5 @@ output/
 *.ptl
 *.dec
 wandb/*
+
+NYUv2
