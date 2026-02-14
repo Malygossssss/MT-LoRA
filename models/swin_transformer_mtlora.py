@@ -18,7 +18,6 @@ from torch import Tensor
 import torch.nn as nn
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from models.lora import MTLoRALinear, MTLoRAQKV
-from models.dora_mtlora import MTDoRALinear, MTDoRAQKV
 
 try:
     import os
@@ -48,7 +47,7 @@ class Mlp(nn.Module):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
 
-        linear_cls = MTDoRALinear if getattr(mtlora, "ADAPTIVE", False) else MTLoRALinear
+        linear_cls = MTLoRALinear
 
         if mtlora.FC1_ENABLED:
             self.fc1 = linear_cls(
@@ -182,7 +181,7 @@ class WindowAttention(nn.Module):
 
         if mtlora.QKV_ENABLED:
             if getattr(mtlora, "SPLIT_QKV", False):
-                qkv_cls = MTDoRAQKV if getattr(mtlora, "ADAPTIVE", False) else MTLoRAQKV
+                qkv_cls = MTLoRAQKV
                 self.qkv = qkv_cls(
                     dim,
                     dim,
@@ -196,7 +195,7 @@ class WindowAttention(nn.Module):
                     shared_mode=mtlora.SHARED_MODE,
                 )
             else:
-                linear_cls = MTDoRALinear if getattr(mtlora, "ADAPTIVE", False) else MTLoRALinear
+                linear_cls = MTLoRALinear
                 self.qkv = linear_cls(
                     dim,
                     dim * 3,
@@ -215,7 +214,7 @@ class WindowAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
 
         if mtlora.PROJ_ENABLED:
-            linear_cls = MTDoRALinear if getattr(mtlora, "ADAPTIVE", False) else MTLoRALinear
+            linear_cls = MTLoRALinear
             self.proj = linear_cls(
                 dim,
                 dim,
@@ -494,7 +493,7 @@ class PatchMerging(nn.Module):
         self.input_resolution = input_resolution
         self.dim = dim
         if mtlora.DOWNSAMPLER_ENABLED:
-            linear_cls = MTDoRALinear if getattr(mtlora, "ADAPTIVE", False) else MTLoRALinear
+            linear_cls = MTLoRALinear
             self.reduction = linear_cls(
                 4 * dim,
                 2 * dim,

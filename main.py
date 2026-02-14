@@ -42,8 +42,6 @@ from mtl_loss_schemes import MultiTaskLoss, get_loss
 from evaluation.evaluate_utils import PerformanceMeter, get_output
 from ptflops import get_model_complexity_info
 from models.lora import mark_only_lora_as_trainable
-from models.dora_mtlora import prune_lora_scaler as dora_prune_lora_scaler
-from models.dora_mtlora import regularization_loss as dora_regularization_loss
 
 try:
     import wandb
@@ -507,7 +505,6 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
 
     for idx, batch in enumerate(data_loader):
         global_step = epoch * num_steps + idx + 1
-        max_step = config.TRAIN.EPOCHS * num_steps
         if not config.MTL:
             samples, targets = batch
             samples = samples.cuda(non_blocking=True)
@@ -522,9 +519,6 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             outputs = model(samples)
             loss, loss_dict = criterion(outputs, targets)
-            if config.MODEL.MTLORA.ADAPTIVE:
-                reg = dora_regularization_loss(model, global_step, max_step, config.MODEL.MTLORA)
-                loss = loss + config.MODEL.MTLORA.REGULARIZATION_LOSS_ALPHA * reg
 
         should_measure_cr = False
         if compute_cr:
@@ -551,8 +545,6 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             optimizer.zero_grad()
             lr_scheduler.step_update(
                 (epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
-            if config.MODEL.MTLORA.ADAPTIVE:
-                dora_prune_lora_scaler(model, global_step, max_step, config.MODEL.MTLORA)
         loss_scale_value = loss_scaler.state_dict()["scale"]
 
         # torch.cuda.synchronize()
