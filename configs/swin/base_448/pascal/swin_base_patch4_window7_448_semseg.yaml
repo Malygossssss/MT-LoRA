@@ -1,0 +1,18 @@
+DATA:
+  IMG_SIZE: 448
+MODEL:
+  TYPE: swin
+  NAME: swin_base_patch4_window7_448_semseg
+  DROP_PATH_RATE: 0.3
+  SWIN:
+    EMBED_DIM: 128
+    DEPTHS: [2, 2, 18, 2]
+    NUM_HEADS: [4, 8, 16, 32]
+    WINDOW_SIZE: 7
+  DECODER_HEAD:
+    semseg: hrnet
+    normals: hrnet
+    sal: hrnet
+    human_parts: hrnet
+    edge: hrnet
+    depth: hrnet
