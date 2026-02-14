@@ -24,6 +24,7 @@ def normalize_tensor(input_tensor, dim):
 class NormalsMeterV2(object):
     def __init__(self, ignore_index=255):
         self.sum_deg_diff = 0
+        self.sum_sq_deg_diff = 0
         self.total = 0
         self.ignore_index = ignore_index
 
@@ -40,12 +41,13 @@ class NormalsMeterV2(object):
         deg_diff = torch.masked_select(deg_diff, valid_mask)
 
         self.sum_deg_diff += torch.sum(deg_diff).cpu().item()
+        self.sum_sq_deg_diff += torch.sum(torch.pow(deg_diff, 2)).cpu().item()
         self.total += deg_diff.numel()
 
     def get_score(self, verbose=False):
         eval_result = dict()
         eval_result['mean'] = self.sum_deg_diff / self.total
-        eval_result['rmse'] = self.sum_deg_diff / self.total
+        eval_result['rmse'] = torch.sqrt(torch.tensor(self.sum_sq_deg_diff / self.total)).item()
 
         if verbose:
             eval_logger.info('Results for Surface Normal Estimation')
