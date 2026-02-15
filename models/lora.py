@@ -187,43 +187,53 @@ class MTLoRALinear(LoRALayer):
 
         if isinstance(r, int):
             r = {'shared': r}
+        r = dict(r)
         super().__init__(
-            r=r['shared'], lora_alpha=lora_shared_scale, lora_dropout=lora_dropout)
+            r=r.get('shared', 0), lora_alpha=lora_shared_scale, lora_dropout=lora_dropout)
 
         self.linear = torch.nn.Linear(
             in_features, out_features, **kwargs)
 
         self.tasks = tasks
         self.shared_mode = shared_mode
-        if r['shared'] > 0:
-            if has_tasks:
-                self.lora_tasks_A = nn.ParameterDict({
-                    task: nn.Parameter(
-                        self.linear.weight.new_zeros((r[task], in_features)))
-                    for task in tasks
+        self.r_shared = int(r.get('shared', 0))
+        self.r_tasks = {task: int(r.get(task, 0)) for task in (tasks or [])}
+        self.has_shared_lora = self.r_shared > 0
+        self.has_task_lora = has_tasks and any(rank > 0 for rank in self.r_tasks.values())
+        self.has_lora = self.has_shared_lora or self.has_task_lora
+
+        if self.has_task_lora:
+            self.lora_tasks_A = nn.ParameterDict({
+                task: nn.Parameter(
+                    self.linear.weight.new_zeros((self.r_tasks[task], in_features)))
+                for task in tasks if self.r_tasks[task] > 0
+            })
+            self.lora_tasks_B = nn.ParameterDict({
+                task: nn.Parameter(
+                    self.linear.weight.new_zeros((out_features, self.r_tasks[task])))
+                for task in tasks if self.r_tasks[task] > 0
+            })
+            if trainable_scale_per_task:
+                self.lora_task_scale = nn.ParameterDict({
+                    task: nn.Parameter(torch.FloatTensor(
+                        [lora_task_scale[task] if isinstance(lora_task_scale, Mapping) else lora_task_scale]))
+                    for task in self.lora_tasks_A.keys()
                 })
-                self.lora_tasks_B = nn.ParameterDict({
-                    task: nn.Parameter(
-                        self.linear.weight.new_zeros((out_features, r[task])))
-                    for task in tasks
-                })
-                if trainable_scale_per_task:
-                    self.lora_task_scale = nn.ParameterDict({
-                        task: nn.Parameter(torch.FloatTensor(
-                            [lora_task_scale]))
-                        for task in tasks
-                    })
-                else:
-                    self.lora_task_scale = {task: lora_task_scale[task]
-                                            for task in tasks}
+            else:
+                self.lora_task_scale = {
+                    task: lora_task_scale[task] if isinstance(lora_task_scale, Mapping) else lora_task_scale
+                    for task in self.lora_tasks_A.keys()
+                }
+
+        if self.has_shared_lora:
             if self.shared_mode == 'addition':
                 assert has_tasks
                 self.lora_norm = nn.LayerNorm(out_features)
             elif self.shared_mode == 'matrix' or self.shared_mode == 'matrixv2':
                 self.lora_shared_A = nn.Parameter(
-                    self.linear.weight.new_zeros((r['shared'], in_features)))
+                    self.linear.weight.new_zeros((self.r_shared, in_features)))
                 self.lora_shared_B = nn.Parameter(
-                    self.linear.weight.new_zeros((out_features, r['shared'])))
+                    self.linear.weight.new_zeros((out_features, self.r_shared)))
             else:
                 raise NotImplementedError
             if trainable_scale_shared:
@@ -231,6 +241,8 @@ class MTLoRALinear(LoRALayer):
                     torch.FloatTensor([lora_shared_scale]))
             else:
                 self.lora_shared_scale = lora_shared_scale
+
+        if self.has_shared_lora or self.has_task_lora:
             self.reset_parameters()
 
     def reset_parameters(self):
@@ -241,7 +253,7 @@ class MTLoRALinear(LoRALayer):
             nn.init.kaiming_uniform_(self.lora_shared_A, a=math.sqrt(5))
             nn.init.zeros_(self.lora_shared_B)
         if hasattr(self, "lora_tasks_A"):
-            for task in self.tasks:
+            for task in self.lora_tasks_A.keys():
                 nn.init.kaiming_uniform_(
                     self.lora_tasks_A[task], a=math.sqrt(5))
                 nn.init.zeros_(self.lora_tasks_B[task])
@@ -253,33 +265,37 @@ class MTLoRALinear(LoRALayer):
     def forward(self, x: torch.Tensor, x_tasks: Dict[str, torch.Tensor] = None):
         # TODO: handle merging
         pretrained = self.linear(x)
-        if self.r == 0:
+        if not self.has_lora:
             return pretrained, None
+
         x = self.lora_dropout(x)
-        if self.shared_mode == 'matrix':
-            lora = (x @ self.lora_shared_A.transpose(0, 1)
-                    @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+        lora = 0.0
+        lora_tasks = None
+
+        if self.has_task_lora:
             lora_tasks = {
                 task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
                     0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                for task in self.tasks
-            } if self.tasks is not None else None
-        elif self.shared_mode == 'matrixv2':
-            lora = (x @ self.lora_shared_A.transpose(0, 1)
-                    @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
-            lora_tasks = {
-                task: pretrained + lora + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                for task in self.tasks
-            } if self.tasks is not None else None
-        elif self.shared_mode == 'addition':
-            lora_tasks = {
-                task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                for task in self.tasks
-            } if self.tasks is not None else None
-            lora = self.lora_norm(torch.sum(torch.stack(
-                list(lora_tasks.values()), dim=0), dim=0))
+                for task in self.lora_tasks_A.keys()
+            }
+
+        if self.has_shared_lora:
+            if self.shared_mode == 'matrix':
+                lora = (x @ self.lora_shared_A.transpose(0, 1)
+                        @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+            elif self.shared_mode == 'matrixv2':
+                lora = (x @ self.lora_shared_A.transpose(0, 1)
+                        @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+                if lora_tasks is not None:
+                    lora_tasks = {task: task_out + lora for task, task_out in lora_tasks.items()}
+            elif self.shared_mode == 'addition':
+                if lora_tasks is None or len(lora_tasks) == 0:
+                    lora = 0.0
+                else:
+                    lora = self.lora_norm(torch.sum(torch.stack(
+                        list(lora_tasks.values()), dim=0), dim=0))
+            else:
+                raise NotImplementedError
 
         return pretrained + lora, lora_tasks
 

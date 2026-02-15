@@ -40,6 +40,14 @@ class CompatLinear(nn.Linear):
     def forward(self, input: Tensor, x_tasks: dict = None) -> Tensor:
         return super().forward(input), None
 
+def _get_shared_only_rank(mtlora, layer_idx):
+    return {'shared': mtlora.R[layer_idx]}
+
+
+def _get_layer_rank(mtlora, layer_idx, with_task_lora=False):
+    if with_task_lora:
+        return mtlora.R_PER_TASK_LIST[layer_idx]
+    return _get_shared_only_rank(mtlora, layer_idx)
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., lora=False, tasks=None, mtlora=None, layer_idx=0):
@@ -49,15 +57,16 @@ class Mlp(nn.Module):
 
         linear_cls = MTLoRALinear
 
+        task_lora_tasks = tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None
         if mtlora.FC1_ENABLED:
             self.fc1 = linear_cls(
                 in_features,
                 hidden_features,
-                r=mtlora.R_PER_TASK_LIST[layer_idx],
+                r=_get_layer_rank(mtlora, layer_idx, with_task_lora=task_lora_tasks is not None),
                 lora_shared_scale=mtlora.SHARED_SCALE[layer_idx],
                 lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx],
                 lora_dropout=mtlora.DROPOUT[layer_idx],
-                tasks=(tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
+                tasks=task_lora_tasks,
                 trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                 trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                 shared_mode=mtlora.SHARED_MODE,
@@ -69,11 +78,11 @@ class Mlp(nn.Module):
             self.fc2 = linear_cls(
                 hidden_features,
                 out_features,
-                r=mtlora.R_PER_TASK_LIST[layer_idx],
+                r=_get_layer_rank(mtlora, layer_idx, with_task_lora=task_lora_tasks is not None),
                 lora_shared_scale=mtlora.SHARED_SCALE[layer_idx],
                 lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx],
                 lora_dropout=mtlora.DROPOUT[layer_idx],
-                tasks=(tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
+                tasks=task_lora_tasks,
                 trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                 trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                 shared_mode=mtlora.SHARED_MODE,
@@ -185,7 +194,7 @@ class WindowAttention(nn.Module):
                 self.qkv = qkv_cls(
                     dim,
                     dim,
-                    r=mtlora.R_PER_TASK_LIST[layer_idx],
+                    r=_get_shared_only_rank(mtlora, layer_idx),
                     lora_shared_scale=mtlora.SHARED_SCALE[layer_idx],
                     lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx],
                     lora_dropout=mtlora.DROPOUT[layer_idx],
@@ -199,7 +208,7 @@ class WindowAttention(nn.Module):
                 self.qkv = linear_cls(
                     dim,
                     dim * 3,
-                    r=mtlora.R_PER_TASK_LIST[layer_idx],
+                    r=_get_shared_only_rank(mtlora, layer_idx),
                     lora_shared_scale=mtlora.SHARED_SCALE[layer_idx],
                     lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx],
                     lora_dropout=mtlora.DROPOUT[layer_idx],
@@ -214,15 +223,16 @@ class WindowAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
 
         if mtlora.PROJ_ENABLED:
+            proj_task_lora_tasks = tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None
             linear_cls = MTLoRALinear
             self.proj = linear_cls(
                 dim,
                 dim,
-                r=mtlora.R_PER_TASK_LIST[layer_idx],
+                r=_get_layer_rank(mtlora, layer_idx, with_task_lora=proj_task_lora_tasks is not None),
                 lora_shared_scale=mtlora.SHARED_SCALE[layer_idx],
                 lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx],
                 lora_dropout=mtlora.DROPOUT[layer_idx],
-                tasks=(tasks if (lora or mtlora.INTERMEDIATE_SPECIALIZATION) else None),
+                tasks=proj_task_lora_tasks,
                 trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                 trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                 shared_mode=mtlora.SHARED_MODE,
@@ -497,7 +507,7 @@ class PatchMerging(nn.Module):
             self.reduction = linear_cls(
                 4 * dim,
                 2 * dim,
-                r=mtlora.R_PER_TASK_LIST[layer_idx],
+                r=_get_shared_only_rank(mtlora, layer_idx),
                 lora_shared_scale=mtlora.SHARED_SCALE[layer_idx],
                 lora_task_scale=mtlora.SCALE_PER_TASK_LIST[layer_idx],
                 lora_dropout=mtlora.DROPOUT[layer_idx],
