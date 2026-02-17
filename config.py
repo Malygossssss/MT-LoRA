@@ -308,6 +308,7 @@ _C.SAVE_FREQ = 1
 _C.PRINT_FREQ = 10
 # Fixed random seed
 _C.SEED = 0
+_C.DETERMINISTIC = False
 # Perform evaluation only, overwritten by command line argument
 _C.EVAL_MODE = False
 # Test throughput only, overwritten by command line argument
@@ -469,6 +470,11 @@ def update_config(config, args):
         config.EVAL_MODE = True
     if _check_args('throughput'):
         config.THROUGHPUT_MODE = True
+
+    if _check_args('seed'):
+        config.SEED = args.seed
+    if _check_args('deterministic'):
+        config.DETERMINISTIC = True
 
        # [SimMIM]
     if _check_args('enable_amp'):

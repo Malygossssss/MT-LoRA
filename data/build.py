@@ -6,6 +6,7 @@
 # --------------------------------------------------------
 
 import os
+import random
 import torch
 import numpy as np
 import torch.distributed as dist
@@ -42,6 +43,13 @@ except:
     from timm.data.transforms import _pil_interp
 
 
+
+
+def _seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 def build_loader(config):
     config.defrost()
     dataset_train, config.MODEL.NUM_CLASSES = build_dataset(
@@ -71,12 +79,17 @@ def build_loader(config):
             dataset_val, shuffle=config.TEST.SHUFFLE
         )
 
+    dataloader_generator = torch.Generator()
+    dataloader_generator.manual_seed(config.SEED + global_rank)
+
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=config.DATA.BATCH_SIZE,
         num_workers=config.DATA.NUM_WORKERS,
         pin_memory=config.DATA.PIN_MEMORY,
         drop_last=True,
+        worker_init_fn=_seed_worker,
+        generator=dataloader_generator,
     )
 
     data_loader_val = torch.utils.data.DataLoader(
@@ -85,7 +98,9 @@ def build_loader(config):
         shuffle=False,
         num_workers=config.DATA.NUM_WORKERS,
         pin_memory=config.DATA.PIN_MEMORY,
-        drop_last=False
+        drop_last=False,
+        worker_init_fn=_seed_worker,
+        generator=dataloader_generator,
     )
 
     # setup mixup / cutmix
