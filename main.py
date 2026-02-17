@@ -88,6 +88,10 @@ def parse_option():
                         help="whether to use gradient checkpointing to save memory")
     parser.add_argument('--disable_amp', action='store_true',
                         help='Disable pytorch amp')
+    parser.add_argument('--seed', type=int,
+                        help='Override random seed used for training')
+    parser.add_argument('--deterministic', action='store_true',
+                        help='Enable deterministic CUDA/cuDNN behavior for reproducibility')
     parser.add_argument('--amp-opt-level', type=str, choices=['O0', 'O1', 'O2'],
                         help='mixed precision opt level, if O0, no amp is used (deprecated!)')
     parser.add_argument('--output', default='output', type=str, metavar='PATH',
@@ -771,9 +775,20 @@ if __name__ == '__main__':
     seed = config.SEED + dist.get_rank()
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
-    cudnn.benchmark = True
+
+    if config.DETERMINISTIC:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        # Some CUDA ops used by dense prediction losses (e.g., nll_loss2d)
+        # are not fully deterministic in current PyTorch/CUDA builds.
+        # warn_only keeps reproducibility diagnostics while avoiding hard crash.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    else:
+        cudnn.benchmark = True
 
     # linear scale the learning rate according to total batch size, may not be optimal
     linear_scaled_lr = config.TRAIN.BASE_LR * \
