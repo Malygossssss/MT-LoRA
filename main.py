@@ -782,7 +782,10 @@ if __name__ == '__main__':
     if config.DETERMINISTIC:
         cudnn.benchmark = False
         cudnn.deterministic = True
-        torch.use_deterministic_algorithms(True)
+        # Some CUDA ops used by dense prediction losses (e.g., nll_loss2d)
+        # are not fully deterministic in current PyTorch/CUDA builds.
+        # warn_only keeps reproducibility diagnostics while avoiding hard crash.
+        torch.use_deterministic_algorithms(True, warn_only=True)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     else:
         cudnn.benchmark = True
