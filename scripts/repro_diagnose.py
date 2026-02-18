@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import platform
+import shlex
 import socket
 import subprocess
 import sys
@@ -273,16 +274,77 @@ def collect_dataset(root: Path, ids: List[str], include_full_hash: bool) -> Dict
     return out
 
 
+def parse_root_from_train_cmd(train_cmd: str) -> Optional[str]:
+    """Parse dataset root from a full training command string."""
+    toks = shlex.split(train_cmd)
+    for i, t in enumerate(toks):
+        if t in {"--pascal", "--data-path", "--nyud"} and i + 1 < len(toks):
+            return toks[i + 1]
+        # also support --pascal=/path style
+        if t.startswith("--pascal="):
+            return t.split("=", 1)[1]
+        if t.startswith("--data-path="):
+            return t.split("=", 1)[1]
+        if t.startswith("--nyud="):
+            return t.split("=", 1)[1]
+    return None
+
+
+def build_quick_findings(report: Dict[str, object]) -> List[str]:
+    findings: List[str] = []
+    ds = report.get("dataset", {})
+    env = report.get("env", {})
+    versions = {v.get("module"): v.get("version") for v in env.get("versions", []) if isinstance(v, dict)}
+
+    if not ds.get("root_exists"):
+        findings.append("[FAIL] dataset root does not exist; dataset hash/label checks are invalid")
+
+    cv2_ver = versions.get("cv2")
+    if cv2_ver:
+        findings.append(f"[INFO] cv2 version: {cv2_ver}")
+
+    td = env.get("torch_details", {})
+    if isinstance(td, dict):
+        if td.get("allow_tf32_matmul") is True:
+            findings.append("[WARN] allow_tf32_matmul=True (for strict reproducibility usually set False)")
+        if td.get("allow_tf32_cudnn") is True:
+            findings.append("[WARN] allow_tf32_cudnn=True (for strict reproducibility usually set False)")
+
+    return findings
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Diagnose cross-server reproducibility issues for MT-LoRA")
-    parser.add_argument("--pascal-root", required=True, help="Path to PASCAL_MT root")
+    parser.add_argument("--pascal-root", default=None, help="Path to PASCAL_MT root")
+    parser.add_argument("--train-cmd", default=None, help="Full training command; script auto-parses --pascal/--data-path")
     parser.add_argument("--ids", default=None, help="Comma-separated ids OR a text file containing one id per line")
     parser.add_argument("--full-hash", action="store_true", help="Compute full content hash of the dataset root (slow)")
+    parser.add_argument("--allow-missing-root", action="store_true", help="Do not fail when dataset root does not exist")
+    parser.add_argument("--print-summary", action="store_true", help="Print quick findings to stdout")
     parser.add_argument("--output", default=None, help="Output JSON path. Default: reports/repro_diag_<host>_<ts>.json")
     args = parser.parse_args()
 
     ids = read_ids(args.ids)
-    pascal_root = Path(args.pascal_root).expanduser().resolve()
+
+    resolved_root = args.pascal_root
+    if not resolved_root and args.train_cmd:
+        resolved_root = parse_root_from_train_cmd(args.train_cmd)
+
+    if not resolved_root:
+        print("[error] please provide --pascal-root or --train-cmd", file=sys.stderr)
+        return 2
+
+    pascal_root = Path(resolved_root).expanduser().resolve()
+
+    if not pascal_root.exists() and not args.allow_missing_root:
+        print(
+            f"[error] dataset root not found: {pascal_root}\n"
+            "Hint: pass the real path used by training, e.g. --pascal-root /abs/path/to/PASCAL_MT "
+            "or --train-cmd '... --pascal /abs/path/to/PASCAL_MT ...'\n"
+            "If you intentionally only want env info, add --allow-missing-root.",
+            file=sys.stderr,
+        )
+        return 2
 
     report = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -295,6 +357,7 @@ def main() -> int:
             "Any mismatch in per_id hashes or semseg source implies data/label pipeline mismatch.",
         ],
     }
+    report["quick_findings"] = build_quick_findings(report)
 
     output = args.output
     if not output:
@@ -306,6 +369,10 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[ok] report written to: {output_path}")
+    if args.print_summary:
+        print("[summary]")
+        for line in report["quick_findings"]:
+            print(" -", line)
     return 0
 
 
