@@ -530,11 +530,33 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             sample_mean = float(samples.mean().item())
             sample_std = float(samples.std().item())
 
+            batch_ids = []
+            if isinstance(batch, dict) and 'meta' in batch and isinstance(batch['meta'], dict) and 'image' in batch['meta']:
+                ids = batch['meta']['image']
+                if isinstance(ids, (list, tuple)):
+                    batch_ids = [str(x) for x in ids[:4]]
+                else:
+                    batch_ids = [str(ids)]
+
             target_stats = []
             if isinstance(targets, dict):
                 for task_name, task_tensor in targets.items():
-                    task_tensor = task_tensor.float()
-                    target_stats.append(f"{task_name}:mean={float(task_tensor.mean().item()):.6f},std={float(task_tensor.std().item()):.6f}")
+                    task_tensor_f = task_tensor.float()
+                    stat = f"{task_name}:mean={float(task_tensor_f.mean().item()):.6f},std={float(task_tensor_f.std().item()):.6f}"
+                    if task_tensor.dim() >= 3:
+                        labels = task_tensor.long().view(-1)
+                        valid = labels != 255
+                        valid_ratio = float(valid.float().mean().item())
+                        stat += f",valid_ratio={valid_ratio:.6f}"
+                        if task_name in {'semseg', 'human_parts'} and valid.any():
+                            valid_labels = labels[valid]
+                            uniq, counts = torch.unique(valid_labels, return_counts=True)
+                            topk = min(3, uniq.numel())
+                            if topk > 0:
+                                order = torch.argsort(counts, descending=True)[:topk]
+                                top_items = [f"{int(uniq[i])}:{int(counts[i])}" for i in order]
+                                stat += f",top_labels={','.join(top_items)}"
+                    target_stats.append(stat)
             else:
                 target_tensor = targets.float()
                 target_stats.append(f"cls:mean={float(target_tensor.mean().item()):.6f},std={float(target_tensor.std().item()):.6f}")
@@ -549,9 +571,10 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 output_stats.append(f"cls:mean={float(out.mean().item()):.6f},std={float(out.std().item()):.6f}")
 
             logger.info(
-                "[debug_repro] epoch=%d step=%d sample(mean=%.6f,std=%.6f) target_stats=[%s] output_stats=[%s] loss=%.6f",
+                "[debug_repro] epoch=%d step=%d ids=%s sample(mean=%.6f,std=%.6f) target_stats=[%s] output_stats=[%s] loss=%.6f",
                 epoch,
                 idx,
+                batch_ids,
                 sample_mean,
                 sample_std,
                 "; ".join(target_stats),
