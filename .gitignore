@@ -142,7 +142,10 @@ output/
 *.pt
 *.ptl
 *.dec
+*.tar.gz
+*.zip
 wandb/*
 
 NYUv2
 NYUv2_MT
+PASCAL_MT
