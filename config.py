@@ -317,6 +317,9 @@ _C.THROUGHPUT_MODE = False
 _C.LOCAL_RANK = 0
 # for acceleration
 _C.FUSED_WINDOW_PROCESS = False
+
+# Debug / reproducibility diagnostics
+_C.DEBUG_REPRO_STEPS = 0
 _C.FUSED_LAYERNORM = False
 _C.SKIP_INITIAL_EVAL = False
 _C.MODEL.DECODER_DOWNSAMPLER = True
@@ -475,6 +478,9 @@ def update_config(config, args):
         config.SEED = args.seed
     if _check_args('deterministic'):
         config.DETERMINISTIC = True
+
+    if _check_args('debug_repro_steps'):
+        config.DEBUG_REPRO_STEPS = int(args.debug_repro_steps)
 
        # [SimMIM]
     if _check_args('enable_amp'):

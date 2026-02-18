@@ -92,6 +92,8 @@ def parse_option():
                         help='Override random seed used for training')
     parser.add_argument('--deterministic', action='store_true',
                         help='Enable deterministic CUDA/cuDNN behavior for reproducibility')
+    parser.add_argument('--debug-repro-steps', type=int, default=0,
+                        help='Log reproducibility diagnostics for first N train steps of each epoch')
     parser.add_argument('--amp-opt-level', type=str, choices=['O0', 'O1', 'O2'],
                         help='mixed precision opt level, if O0, no amp is used (deprecated!)')
     parser.add_argument('--output', default='output', type=str, metavar='PATH',
@@ -524,6 +526,62 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             outputs = model(samples)
             loss, loss_dict = criterion(outputs, targets)
 
+        if config.DEBUG_REPRO_STEPS > 0 and idx < config.DEBUG_REPRO_STEPS and dist.get_rank() == 0:
+            sample_mean = float(samples.mean().item())
+            sample_std = float(samples.std().item())
+
+            batch_ids = []
+            if isinstance(batch, dict) and 'meta' in batch and isinstance(batch['meta'], dict) and 'image' in batch['meta']:
+                ids = batch['meta']['image']
+                if isinstance(ids, (list, tuple)):
+                    batch_ids = [str(x) for x in ids[:4]]
+                else:
+                    batch_ids = [str(ids)]
+
+            target_stats = []
+            if isinstance(targets, dict):
+                for task_name, task_tensor in targets.items():
+                    task_tensor_f = task_tensor.float()
+                    stat = f"{task_name}:mean={float(task_tensor_f.mean().item()):.6f},std={float(task_tensor_f.std().item()):.6f}"
+                    if task_tensor.dim() >= 3:
+                        labels = task_tensor.long().view(-1)
+                        valid = labels != 255
+                        valid_ratio = float(valid.float().mean().item())
+                        stat += f",valid_ratio={valid_ratio:.6f}"
+                        if task_name in {'semseg', 'human_parts'} and valid.any():
+                            valid_labels = labels[valid]
+                            uniq, counts = torch.unique(valid_labels, return_counts=True)
+                            topk = min(3, uniq.numel())
+                            if topk > 0:
+                                order = torch.argsort(counts, descending=True)[:topk]
+                                top_items = [f"{int(uniq[i])}:{int(counts[i])}" for i in order]
+                                stat += f",top_labels={','.join(top_items)}"
+                    target_stats.append(stat)
+            else:
+                target_tensor = targets.float()
+                target_stats.append(f"cls:mean={float(target_tensor.mean().item()):.6f},std={float(target_tensor.std().item()):.6f}")
+
+            output_stats = []
+            if isinstance(outputs, dict):
+                for task_name, out in outputs.items():
+                    out = out.float()
+                    output_stats.append(f"{task_name}:mean={float(out.mean().item()):.6f},std={float(out.std().item()):.6f}")
+            else:
+                out = outputs.float()
+                output_stats.append(f"cls:mean={float(out.mean().item()):.6f},std={float(out.std().item()):.6f}")
+
+            logger.info(
+                "[debug_repro] epoch=%d step=%d ids=%s sample(mean=%.6f,std=%.6f) target_stats=[%s] output_stats=[%s] loss=%.6f",
+                epoch,
+                idx,
+                batch_ids,
+                sample_mean,
+                sample_std,
+                "; ".join(target_stats),
+                "; ".join(output_stats),
+                float(loss.item()),
+            )
+
         should_measure_cr = False
         if compute_cr:
             should_measure_cr = ((idx + 1) % cr_period == 0) or (idx == num_steps - 1)
@@ -821,6 +879,18 @@ if __name__ == '__main__':
 
     logger.info(config.dump())
     logger.info(json.dumps(vars(args)))
+    logger.info(
+        "Runtime: torch=%s cuda=%s cudnn=%s device=%s amp=%s deterministic=%s tf32(matmul=%s,cudnn=%s) debug_repro_steps=%s",
+        torch.__version__,
+        torch.version.cuda,
+        cudnn.version(),
+        torch.cuda.get_device_name(torch.cuda.current_device()),
+        config.AMP_ENABLE,
+        config.DETERMINISTIC,
+        torch.backends.cuda.matmul.allow_tf32,
+        torch.backends.cudnn.allow_tf32,
+        config.DEBUG_REPRO_STEPS,
+    )
 
     if args.disable_wandb:
         wandb_available = False
