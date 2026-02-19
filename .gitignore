@@ -146,6 +146,8 @@ output/
 *.zip
 wandb/*
 
-NYUv2/
-NYUv2_MT/
-PASCAL_MT/
+/NYUv2
+/NYUv2_MT
+/output
+/PASCAL_MT
+/reports
