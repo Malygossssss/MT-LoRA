@@ -151,3 +151,5 @@ wandb/*
 /output
 /PASCAL_MT
 /reports
+/backbone
+/output_backup
