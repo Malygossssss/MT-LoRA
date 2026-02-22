@@ -47,9 +47,10 @@ class MaskGenerator:
 
 class SimMIMTransform:
     def __init__(self, config):
+        img_size = tuple(config.DATA.IMG_SIZE)
         self.transform_img = T.Compose([
             T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-            T.RandomResizedCrop(config.DATA.IMG_SIZE, scale=(0.67, 1.), ratio=(3. / 4., 4. / 3.)),
+            T.RandomResizedCrop(img_size, scale=(0.67, 1.), ratio=(3. / 4., 4. / 3.)),
             T.RandomHorizontalFlip(),
             T.ToTensor(),
             T.Normalize(mean=torch.tensor(IMAGENET_DEFAULT_MEAN),std=torch.tensor(IMAGENET_DEFAULT_STD)),
@@ -60,8 +61,11 @@ class SimMIMTransform:
         else:
             raise NotImplementedError
         
+        if img_size[0] != img_size[1]:
+            raise ValueError("SimMIM pretraining currently requires square DATA.IMG_SIZE")
+
         self.mask_generator = MaskGenerator(
-            input_size=config.DATA.IMG_SIZE,
+            input_size=img_size[0],
             mask_patch_size=config.DATA.MASK_PATCH_SIZE,
             model_patch_size=model_patch_size,
             mask_ratio=config.DATA.MASK_RATIO,

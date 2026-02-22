@@ -375,6 +375,17 @@ def update_config(config, args):
     if args.opts:
         config.merge_from_list(args.opts)
 
+    def _normalize_img_size(img_size):
+        if isinstance(img_size, int):
+            return (img_size, img_size)
+        if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
+            return (int(img_size[0]), int(img_size[1]))
+        raise ValueError(
+            f"DATA.IMG_SIZE must be an int or [height, width], got: {img_size}"
+        )
+
+    config.DATA.IMG_SIZE = _normalize_img_size(config.DATA.IMG_SIZE)
+
     def _check_args(name):
         if hasattr(args, name) and eval(f'args.{name}'):
             return True
