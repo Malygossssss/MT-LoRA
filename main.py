@@ -166,7 +166,11 @@ def main(config):
     logger.info(f"number of params: {n_parameters / 1e6} M")
 
     model.cuda()
-    macs, params = get_model_complexity_info(model, (3, config.DATA.IMG_SIZE, config.DATA.IMG_SIZE), as_strings=True,
+    if isinstance(config.DATA.IMG_SIZE, (list, tuple)):
+        input_h, input_w = config.DATA.IMG_SIZE
+    else:
+        input_h = input_w = config.DATA.IMG_SIZE
+    macs, params = get_model_complexity_info(model, (3, input_h, input_w), as_strings=True,
                                              print_per_layer_stat=False, verbose=False)
 
     logger.info(f"ptflops GMACS = {macs} and params = {params}")
