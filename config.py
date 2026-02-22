@@ -37,7 +37,7 @@ _C.DATA.DATA_PATH = ''
 # Dataset name
 _C.DATA.DATASET = 'nyud'
 # Input image size
-_C.DATA.IMG_SIZE = 224
+_C.DATA.IMG_SIZE = (224, 224)
 # _C.DATA.IMG_SIZE = (480, 640)
 # _C.DATA.IMG_SIZE = (448, 448)
 # Interpolation to resize image (random, bilinear, bicubic)
@@ -353,6 +353,30 @@ _C.MODEL.MTLORA.ADAPTIVE_EPS = 1e-8
 _C.MODEL.MTLORA.REGULARIZATION_LOSS_ALPHA = 0.0
 
 
+
+def _normalize_img_size(img_size):
+    if isinstance(img_size, int):
+        return (img_size, img_size)
+    if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
+        return (int(img_size[0]), int(img_size[1]))
+    raise ValueError(
+        f"DATA.IMG_SIZE must be an int or [height, width], got: {img_size}"
+    )
+
+
+def _normalize_img_size_opts(opts):
+    if not opts:
+        return opts
+    normalized = list(opts)
+    for i in range(0, len(normalized) - 1, 2):
+        if normalized[i] == 'DATA.IMG_SIZE':
+            value = yaml.safe_load(str(normalized[i + 1]))
+            h, w = _normalize_img_size(value)
+            normalized[i + 1] = f"[{h}, {w}]"
+    return normalized
+
+
+
 def _update_config_from_file(config, cfg_file):
     config.defrost()
     with open(cfg_file, 'r') as f:
@@ -363,8 +387,11 @@ def _update_config_from_file(config, cfg_file):
             _update_config_from_file(
                 config, os.path.join(os.path.dirname(cfg_file), cfg)
             )
+    if 'DATA' in yaml_cfg and isinstance(yaml_cfg['DATA'], dict) and 'IMG_SIZE' in yaml_cfg['DATA']:
+        yaml_cfg['DATA']['IMG_SIZE'] = _normalize_img_size(yaml_cfg['DATA']['IMG_SIZE'])
+
     print('=> merge config from {}'.format(cfg_file))
-    config.merge_from_file(cfg_file)
+    config.merge_from_other_cfg(CN(yaml_cfg))
     config.freeze()
 
 
@@ -373,16 +400,7 @@ def update_config(config, args):
 
     config.defrost()
     if args.opts:
-        config.merge_from_list(args.opts)
-
-    def _normalize_img_size(img_size):
-        if isinstance(img_size, int):
-            return (img_size, img_size)
-        if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
-            return (int(img_size[0]), int(img_size[1]))
-        raise ValueError(
-            f"DATA.IMG_SIZE must be an int or [height, width], got: {img_size}"
-        )
+        config.merge_from_list(_normalize_img_size_opts(args.opts))
 
     config.DATA.IMG_SIZE = _normalize_img_size(config.DATA.IMG_SIZE)
 
