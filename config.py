@@ -37,7 +37,7 @@ _C.DATA.DATA_PATH = ''
 # Dataset name
 _C.DATA.DATASET = 'nyud'
 # Input image size
-_C.DATA.IMG_SIZE = 224
+_C.DATA.IMG_SIZE = [224, 224]
 # _C.DATA.IMG_SIZE = (480, 640)
 # _C.DATA.IMG_SIZE = (448, 448)
 # Interpolation to resize image (random, bilinear, bicubic)
@@ -353,13 +353,18 @@ def _update_config_from_file(config, cfg_file):
     with open(cfg_file, 'r') as f:
         yaml_cfg = yaml.load(f, Loader=yaml.FullLoader)
 
+    if 'DATA' in yaml_cfg and 'IMG_SIZE' in yaml_cfg['DATA']:
+        img_size = yaml_cfg['DATA']['IMG_SIZE']
+        if isinstance(img_size, int):
+            yaml_cfg['DATA']['IMG_SIZE'] = [img_size, img_size]
+
     for cfg in yaml_cfg.setdefault('BASE', ['']):
         if cfg:
             _update_config_from_file(
                 config, os.path.join(os.path.dirname(cfg_file), cfg)
             )
     print('=> merge config from {}'.format(cfg_file))
-    config.merge_from_file(cfg_file)
+    config.merge_from_other_cfg(CN(yaml_cfg))
     config.freeze()
 
 
