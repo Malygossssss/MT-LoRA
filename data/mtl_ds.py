@@ -809,11 +809,18 @@ def get_tasks_config(db_name, task_list, img_size):
         task_cfg.ALL_TASKS.FLAGVALS[k] = task_cfg.FLAGVALS[k]
         task_cfg.ALL_TASKS.INFER_FLAGVALS[k] = task_cfg.INFER_FLAGVALS[k]
 
+    if isinstance(img_size, int):
+        img_scale = (img_size, img_size)
+    elif isinstance(img_size, (list, tuple)) and len(img_size) == 2:
+        img_scale = (int(img_size[0]), int(img_size[1]))
+    else:
+        raise ValueError(f"img_size must be an int or [height, width], got {img_size}")
+
     task_cfg.TRAIN = {
-        'SCALE': (img_size, img_size),
+        'SCALE': img_scale,
     }
     task_cfg.TEST = {
-        'SCALE': (img_size, img_size),
+        'SCALE': img_scale,
     }
 
     return task_cfg, other_args
