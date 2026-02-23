@@ -124,6 +124,8 @@ def main() -> None:
     ap.add_argument("--pred-ext", choices=["npy", "mat"], default="npy")
     ap.add_argument("--pred-key", default="depth")
     ap.add_argument("--max-samples", type=int, default=0)
+    ap.add_argument("--gt-scale", type=float, default=1.0,
+                    help="Multiply GT depth by this factor before evaluation (e.g., 0.001 for mm->m)")
     ap.add_argument("--split", choices=["all", "train", "val", "test"], default="all",
                     help="Only audit IDs from this NYUD split (read from <dataset_root>/gt_sets/<split>.txt)")
     ap.add_argument("--dataset-root", type=Path, default=None,
@@ -169,6 +171,8 @@ def main() -> None:
 
     for sid in common:
         gt = np.load(gt_files[sid]).astype(np.float64)
+        if args.gt_scale != 1.0:
+            gt = gt * args.gt_scale
         pred = _load_depth(pred_files[sid], args.pred_ext, args.pred_key)
         if gt.shape != pred.shape:
             if args.resize_gt_to_pred:

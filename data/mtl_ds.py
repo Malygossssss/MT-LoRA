@@ -225,7 +225,9 @@ class NYUD_MT(data.Dataset):
         return _semseg
 
     def _load_depth(self, index):
-        _depth = np.load(self.depths[index])
+        _depth = np.load(self.depths[index]).astype(np.float32)
+        # NYUD depth files are in millimeters; convert to meters for a better-scaled regression target.
+        _depth = _depth / 1000.0
         return _depth
 
     def _load_normals(self, index):
