@@ -66,8 +66,8 @@ RE_SALIENCY_HEADER = re.compile(r"Results for Saliency Estimation")
 RE_SALIENCY_MIOU = re.compile(r"\bmIoU:\s*([0-9.]+)")
 RE_NORMALS_HEADER = re.compile(r"Results for Surface Normal Estimation")
 RE_NORMALS_MEAN = re.compile(r"\bmean:\s*([0-9.]+)")
-RE_DEPTH_HEADER = re.compile(r"Results for Depth Estimation")
-RE_DEPTH_RMSE = re.compile(r"\brmse:\s*([0-9.]+)")
+RE_DEPTH_HEADER = re.compile(r"Results for (Depth Estimation|depth prediction)", re.IGNORECASE)
+RE_DEPTH_RMSE = re.compile(r"\brmse\s*:?\s*([0-9.]+)", re.IGNORECASE)
 
 
 def parse_tasks(task_text: str) -> List[str]:
