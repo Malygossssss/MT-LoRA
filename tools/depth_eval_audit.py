@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 try:
     import scipy.io as sio
@@ -16,6 +18,25 @@ except Exception:
 
 def _collect_files(folder: Path, ext: str) -> Dict[str, Path]:
     return {p.stem: p for p in folder.glob(f"*.{ext}")}
+
+
+def _load_split_ids(split: str, gt_dir: Path, dataset_root: Path | None) -> set[str]:
+    if split == "all":
+        return set()
+
+    root = dataset_root if dataset_root is not None else gt_dir.parent
+    split_file = root / "gt_sets" / f"{split}.txt"
+    if not split_file.exists():
+        raise FileNotFoundError(
+            f"Split file not found: {split_file}. Please set --dataset-root correctly."
+        )
+
+    ids = set()
+    for line in split_file.read_text().splitlines():
+        line = line.strip()
+        if line:
+            ids.add(line)
+    return ids
 
 
 def _load_depth(path: Path, pred_ext: str, pred_key: str) -> np.ndarray:
@@ -35,6 +56,19 @@ def _load_depth(path: Path, pred_ext: str, pred_key: str) -> np.ndarray:
 
 def _valid_mask(gt: np.ndarray) -> np.ndarray:
     return np.isfinite(gt) & (gt != 0) & (gt != 255)
+
+
+def _resize_to_shape(arr: np.ndarray, out_hw: Tuple[int, int], mode: str) -> np.ndarray:
+    h, w = out_hw
+    if arr.shape == (h, w):
+        return arr
+
+    tensor = torch.from_numpy(arr).float().unsqueeze(0).unsqueeze(0)
+    if mode == "nearest":
+        resized = F.interpolate(tensor, size=(h, w), mode="nearest")
+    else:
+        resized = F.interpolate(tensor, size=(h, w), mode="bilinear", align_corners=False)
+    return resized.squeeze(0).squeeze(0).cpu().numpy()
 
 
 def _metrics(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-9) -> Dict[str, float]:
@@ -90,10 +124,23 @@ def main() -> None:
     ap.add_argument("--pred-ext", choices=["npy", "mat"], default="npy")
     ap.add_argument("--pred-key", default="depth")
     ap.add_argument("--max-samples", type=int, default=0)
+    ap.add_argument("--split", choices=["all", "train", "val", "test"], default="all",
+                    help="Only audit IDs from this NYUD split (read from <dataset_root>/gt_sets/<split>.txt)")
+    ap.add_argument("--dataset-root", type=Path, default=None,
+                    help="Dataset root containing gt_sets/. Defaults to parent of --gt-dir")
+    ap.add_argument("--resize-gt-to-pred", action="store_true",
+                    help="Resize GT depth to prediction spatial size before metric computation")
+    ap.add_argument("--resize-mode", choices=["nearest", "bilinear"], default="bilinear",
+                    help="Interpolation mode used when --resize-gt-to-pred is enabled")
     args = ap.parse_args()
 
     gt_files = _collect_files(args.gt_dir, "npy")
     pred_files = _collect_files(args.pred_dir, args.pred_ext)
+
+    split_ids = _load_split_ids(args.split, args.gt_dir, args.dataset_root)
+    if split_ids:
+        gt_files = {k: v for k, v in gt_files.items() if k in split_ids}
+        pred_files = {k: v for k, v in pred_files.items() if k in split_ids}
 
     gt_ids, pred_ids = set(gt_files), set(pred_files)
     common = sorted(gt_ids & pred_ids)
@@ -124,8 +171,11 @@ def main() -> None:
         gt = np.load(gt_files[sid]).astype(np.float64)
         pred = _load_depth(pred_files[sid], args.pred_ext, args.pred_key)
         if gt.shape != pred.shape:
-            shape_mismatch += 1
-            continue
+            if args.resize_gt_to_pred:
+                gt = _resize_to_shape(gt, pred.shape, mode=args.resize_mode).astype(np.float64)
+            else:
+                shape_mismatch += 1
+                continue
         pairs.append((pred, gt))
         m = _valid_mask(gt) & np.isfinite(pred)
         if m.any():
