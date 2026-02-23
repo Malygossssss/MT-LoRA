@@ -60,7 +60,9 @@ def eval_depth(loader, folder):
 
 class DepthMeter(object):
     def __init__(self):
-        self.reset()
+        self.total_rmses = 0.0
+        self.total_log_rmses = 0.0
+        self.n_valid = 0.0
 
     @torch.no_grad()
     def update(self, pred, gt):
@@ -68,31 +70,23 @@ class DepthMeter(object):
         
         # Determine valid mask
         mask = (gt != 255).bool()
-        valid_count = mask.float().sum().item()
-        self.n_valid += valid_count  # Valid pixels per image
-
-        if valid_count == 0:
-            return
-
-        # Keep only valid pixels when computing metrics.
-        pred = torch.masked_select(pred, mask)
-        gt = torch.masked_select(gt, mask)
+        self.n_valid += mask.float().sum().item() # Valid pixels per image
         
         # Only positive depth values are possible
         pred = torch.clamp(pred, min=1e-9)
-        gt = torch.clamp(gt, min=1e-9)
 
         # Per pixel rmse and log-rmse.
         log_rmse_tmp = torch.pow(torch.log(gt) - torch.log(pred), 2)
+        log_rmse_tmp = torch.masked_select(log_rmse_tmp, mask)
         self.total_log_rmses += log_rmse_tmp.sum().item()
 
         rmse_tmp = torch.pow(gt - pred, 2)
+        rmse_tmp = torch.masked_select(rmse_tmp, mask)
         self.total_rmses += rmse_tmp.sum().item()
 
     def reset(self):
-        self.total_rmses = 0.0
-        self.total_log_rmses = 0.0
-        self.n_valid = 0.0
+        self.rmses = []
+        self.log_rmses = []
         
     def get_score(self, verbose=True):
         eval_result = dict()
