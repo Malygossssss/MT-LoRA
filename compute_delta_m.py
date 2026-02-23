@@ -22,7 +22,7 @@ PAPER_ST_DEFAULTS = {
     "human_miou": 61.93,
     "saliency_miou": 62.35,
     "normals_mean": 17.97,
-    "depth_rmse": 0.64,
+    "depth_rmse": 0.6436,
 }
 
 TASK_SPECS = {
