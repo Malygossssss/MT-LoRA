@@ -68,9 +68,10 @@ class DepthMeter(object):
         
         # Determine valid mask
         mask = (gt != 255).bool()
-        self.n_valid += mask.float().sum().item() # Valid pixels per image
+        valid_count = mask.float().sum().item()
+        self.n_valid += valid_count  # Valid pixels per image
 
-        if self.n_valid == 0:
+        if valid_count == 0:
             return
 
         # Keep only valid pixels when computing metrics.
