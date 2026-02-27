@@ -143,3 +143,11 @@ output/
 *.ptl
 *.dec
 wandb/*
+
+/NYUv2
+/NYUv2_MT
+/output
+/PASCAL_MT
+/reports
+/backbone
+/output_backup
