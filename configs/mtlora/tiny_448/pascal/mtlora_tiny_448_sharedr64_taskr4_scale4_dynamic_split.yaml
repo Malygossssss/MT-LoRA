@@ -2,7 +2,7 @@ DATA:
   IMG_SIZE: 448
 MODEL:
   TYPE: swin
-  NAME: mmtlora_tiny_448_sharedr64_taskr4_scale4_dynamic_split
+  NAME: mtlora_tiny_448_sharedr64_taskr4_scale4_dynamic_split
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
@@ -26,7 +26,7 @@ MODEL:
     FC1_ENABLED: True
     FC2_ENABLED: True
     DOWNSAMPLER_ENABLED: False
-    OURS_MAX_GROUPS: [1, 1, 4, 4]
+    OURS_MAX_GROUPS: [1, 2, 4, 4]
     OURS_DELTA_THRESHOLD: 0.05
     OURS_WARMUP_RATIO: 0.1
     OURS_INTERVAL_EPOCHS: 10
@@ -36,12 +36,12 @@ MODEL:
     OURS_SYM_BREAK_BATCHES: 2
     OURS_SPLIT_LR_SCALE: 0.5
     R_PER_TASK:
-      semseg: [4]
-      normals: [4]
-      sal: [4]
-      human_parts: [4]
-      edge: [4]
-      depth: [4]
+      semseg: [0]
+      normals: [0]
+      sal: [0]
+      human_parts: [0]
+      edge: [0]
+      depth: [0]
       shared: [64]
   DECODER_HEAD:
     semseg: hrnet
