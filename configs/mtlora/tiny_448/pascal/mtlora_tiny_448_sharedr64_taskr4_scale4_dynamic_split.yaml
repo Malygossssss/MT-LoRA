@@ -2,7 +2,7 @@ DATA:
   IMG_SIZE: 448
 MODEL:
   TYPE: swin
-  NAME: mtlora_tiny_448_r64_scale4_pertask_ours
+  NAME: mmtlora_tiny_448_sharedr64_taskr4_scale4_dynamic_split
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
