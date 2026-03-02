@@ -319,6 +319,7 @@ def main(config):
         epoch_cr_records, epoch_cr_sum, epoch_cr_count = train_one_epoch(config, model, criterion, data_loader_train,
                                                                          optimizer, epoch, mixup_fn, lr_scheduler,
                                                                          loss_scaler, teacher=teacher)
+        _maybe_run_online_split(config, model, criterion, data_loader_train, optimizer, epoch, logger)
         if config.TRAIN.ENABLE_CONFLICT_RATIO:
             total_cr_sum += epoch_cr_sum
             total_cr_count += epoch_cr_count
@@ -460,6 +461,82 @@ def _compute_conflict_ratio(loss_dict, shared_params, task_order, task_weights):
         return 0.0
 
     return float(sum(ratios) / len(ratios))
+
+
+def _get_stage_lora_params(model, stage_idx):
+    params = []
+    for name, p in model.named_parameters():
+        if p.requires_grad and f"backbone.layers.{stage_idx}." in name and "lora" in name:
+            params.append(p)
+    return params
+
+
+def _collect_task_stage_grads(config, model, criterion, data_loader, stage_idx, n_probe):
+    stage_params = _get_stage_lora_params(model, stage_idx)
+    if not stage_params:
+        return {}
+    task_grads = {t: [] for t in config.TASKS}
+    was_training = model.training
+    model.eval()
+    it = iter(data_loader)
+    for _ in range(n_probe):
+        try:
+            batch = next(it)
+        except StopIteration:
+            break
+        samples = batch['image'].cuda(non_blocking=True)
+        targets = {task: batch[task].cuda(non_blocking=True) for task in config.TASKS}
+        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+            outputs = model(samples)
+            _, loss_dict = criterion(outputs, targets)
+        for t in config.TASKS:
+            grads = torch.autograd.grad(loss_dict[t], stage_params, retain_graph=True, allow_unused=True)
+            vec = torch.cat([(g.detach().float().reshape(-1) if g is not None else torch.zeros_like(p).float().reshape(-1))
+                            for g, p in zip(grads, stage_params)])
+            task_grads[t].append(vec)
+    if was_training:
+        model.train()
+    return {t: torch.stack(v, 0).mean(0) for t, v in task_grads.items() if v}
+
+
+def _maybe_run_online_split(config, model, criterion, data_loader, optimizer, epoch, logger):
+    if not (config.MODEL.MTLORA.ENABLED and config.MODEL.MTLORA.USE_OURS):
+        return
+    wrapped = model.module if hasattr(model, 'module') else model
+    backbone = wrapped.backbone if hasattr(wrapped, 'backbone') else None
+    router = getattr(backbone, 'dynamic_router', None)
+    if router is None:
+        return
+    warmup_epochs = max(1, int(config.TRAIN.EPOCHS * config.MODEL.MTLORA.OURS_WARMUP_RATIO))
+    stop_epoch = int(config.TRAIN.EPOCHS * config.MODEL.MTLORA.OURS_STOP_SPLIT_RATIO)
+    interval = max(1, int(config.MODEL.MTLORA.OURS_INTERVAL_EPOCHS))
+    cooldown = max(0, int(config.MODEL.MTLORA.OURS_COOLDOWN_EPOCHS))
+    last_split = getattr(backbone, '_last_split_epoch', -10**9)
+    if epoch < warmup_epochs or epoch >= stop_epoch or ((epoch - warmup_epochs) % interval != 0) or (epoch - last_split < cooldown):
+        return
+    probe_batches = max(1, int(len(data_loader) * config.MODEL.MTLORA.OURS_PROBE_RATIO))
+    for stage_idx in range(backbone.num_layers):
+        if not router.can_split_stage(stage_idx):
+            continue
+        grads = _collect_task_stage_grads(config, model, criterion, data_loader, stage_idx, probe_batches)
+        if len(grads) < 2:
+            continue
+        sim = {(t1, t2): torch.nn.functional.cosine_similarity(grads[t1], grads[t2], dim=0).item()
+               for t1 in grads for t2 in grads}
+        for group in list(router.stage_groups[stage_idx]):
+            best = router.best_bisect(group, sim)
+            if best is None:
+                continue
+            delta, ga, gb = best
+            if delta <= float(config.MODEL.MTLORA.OURS_DELTA_THRESHOLD):
+                continue
+            parent_idx, new_idx = router.apply_split(stage_idx, group, ga, gb)
+            for m in backbone.modules():
+                if hasattr(m, 'layer_idx') and m.layer_idx == stage_idx and hasattr(m, 'clone_group'):
+                    m.clone_group(parent_idx, new_idx)
+            backbone._last_split_epoch = epoch
+            logger.info(f"[Ours] Split stage={stage_idx}, delta={delta:.4f}, {group} -> {ga}|{gb}")
+            return
 
 
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):

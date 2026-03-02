@@ -346,6 +346,16 @@ _C.MODEL.MTLORA.PROJ_ENABLED = True
 _C.MODEL.MTLORA.FC1_ENABLED = True
 _C.MODEL.MTLORA.FC2_ENABLED = True
 _C.MODEL.MTLORA.DOWNSAMPLER_ENABLED = False
+_C.MODEL.MTLORA.USE_OURS = False
+_C.MODEL.MTLORA.OURS_MAX_GROUPS = [1, 1, 4, 4]
+_C.MODEL.MTLORA.OURS_DELTA_THRESHOLD = 0.05
+_C.MODEL.MTLORA.OURS_WARMUP_RATIO = 0.1
+_C.MODEL.MTLORA.OURS_INTERVAL_EPOCHS = 10
+_C.MODEL.MTLORA.OURS_COOLDOWN_EPOCHS = 10
+_C.MODEL.MTLORA.OURS_STOP_SPLIT_RATIO = 0.5
+_C.MODEL.MTLORA.OURS_PROBE_RATIO = 0.04
+_C.MODEL.MTLORA.OURS_SYM_BREAK_BATCHES = 2
+_C.MODEL.MTLORA.OURS_SPLIT_LR_SCALE = 0.5
 
 
 def _update_config_from_file(config, cfg_file):
@@ -510,6 +520,13 @@ def update_config(config, args):
 
     # Normalize MTLoRA config
     if config.MODEL.MTLORA.ENABLED:
+        if not isinstance(config.MODEL.MTLORA.OURS_MAX_GROUPS, list):
+            config.MODEL.MTLORA.OURS_MAX_GROUPS = [
+                config.MODEL.MTLORA.OURS_MAX_GROUPS] * len(config.MODEL.SWIN.DEPTHS)
+        elif len(config.MODEL.MTLORA.OURS_MAX_GROUPS) == 1:
+            config.MODEL.MTLORA.OURS_MAX_GROUPS = config.MODEL.MTLORA.OURS_MAX_GROUPS * len(config.MODEL.SWIN.DEPTHS)
+        else:
+            assert len(config.MODEL.MTLORA.OURS_MAX_GROUPS) == len(config.MODEL.SWIN.DEPTHS)
         if not isinstance(config.MODEL.MTLORA.R, list):
             config.MODEL.MTLORA.R = [
                 config.MODEL.MTLORA.R] * len(config.MODEL.SWIN.DEPTHS)

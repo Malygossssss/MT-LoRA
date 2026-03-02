@@ -17,7 +17,8 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from models.lora import MTLoRALinear, MTLoRAQKV
+from models.lora import MTLoRALinear, MTLoRAQKV, set_global_dynamic_router
+from models.dynamic_split import DynamicSplitRouter
 
 try:
     import os
@@ -70,6 +71,9 @@ class Mlp(nn.Module):
                 trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                 trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                 shared_mode=mtlora.SHARED_MODE,
+                dynamic_router=getattr(mtlora, 'DYNAMIC_ROUTER', None),
+                layer_idx=layer_idx,
+                max_dynamic_groups=max(getattr(mtlora, 'OURS_MAX_GROUPS', [4])),
             )
         else:
             self.fc1 = CompatLinear(in_features, hidden_features)
@@ -86,6 +90,9 @@ class Mlp(nn.Module):
                 trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                 trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                 shared_mode=mtlora.SHARED_MODE,
+                dynamic_router=getattr(mtlora, 'DYNAMIC_ROUTER', None),
+                layer_idx=layer_idx,
+                max_dynamic_groups=max(getattr(mtlora, 'OURS_MAX_GROUPS', [4])),
             )
         else:
             self.fc2 = CompatLinear(hidden_features, out_features)
@@ -202,6 +209,9 @@ class WindowAttention(nn.Module):
                     trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                     trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                     shared_mode=mtlora.SHARED_MODE,
+                    dynamic_router=getattr(mtlora, 'DYNAMIC_ROUTER', None),
+                    layer_idx=layer_idx,
+                    max_dynamic_groups=max(getattr(mtlora, 'OURS_MAX_GROUPS', [4])),
                 )
             else:
                 linear_cls = MTLoRALinear
@@ -217,6 +227,9 @@ class WindowAttention(nn.Module):
                     trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                     trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                     shared_mode=mtlora.SHARED_MODE,
+                    dynamic_router=getattr(mtlora, 'DYNAMIC_ROUTER', None),
+                    layer_idx=layer_idx,
+                    max_dynamic_groups=max(getattr(mtlora, 'OURS_MAX_GROUPS', [4])),
                     )
         else:
             self.qkv = CompatLinear(dim, dim * 3, bias=qkv_bias)
@@ -236,6 +249,9 @@ class WindowAttention(nn.Module):
                 trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                 trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                 shared_mode=mtlora.SHARED_MODE,
+                dynamic_router=getattr(mtlora, 'DYNAMIC_ROUTER', None),
+                layer_idx=layer_idx,
+                max_dynamic_groups=max(getattr(mtlora, 'OURS_MAX_GROUPS', [4])),
             )
         else:
             self.proj = CompatLinear(dim, dim)
@@ -516,6 +532,9 @@ class PatchMerging(nn.Module):
                 trainable_scale_shared=mtlora.TRAINABLE_SCALE_SHARED,
                 trainable_scale_per_task=mtlora.TRAINABLE_SCALE_PER_TASK,
                 shared_mode=mtlora.SHARED_MODE,
+                dynamic_router=getattr(mtlora, 'DYNAMIC_ROUTER', None),
+                layer_idx=layer_idx,
+                max_dynamic_groups=max(getattr(mtlora, 'OURS_MAX_GROUPS', [4])),
                 )
         else:
             self.reduction = CompatLinear(4 * dim, 2 * dim, bias=False)
@@ -731,6 +750,13 @@ class SwinTransformerMTLoRA(nn.Module):
         self.mlp_ratio = mlp_ratio
         self.tasks = tasks
         self.mtlora = mtlora
+        self.dynamic_router = DynamicSplitRouter(
+            tasks=tasks,
+            num_stages=self.num_layers,
+            max_groups=getattr(mtlora, 'OURS_MAX_GROUPS', [1, 1, 4, 4]),
+            enabled=getattr(mtlora, 'USE_OURS', False),
+        )
+        set_global_dynamic_router(self.dynamic_router)
 
         # Print lora params:
         if mtlora is not None:

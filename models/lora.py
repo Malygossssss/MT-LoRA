@@ -58,6 +58,13 @@ import torch.nn as nn
 from torch.nn import functional as F
 from typing_extensions import Self
 
+GLOBAL_DYNAMIC_ROUTER = None
+
+
+def set_global_dynamic_router(router):
+    global GLOBAL_DYNAMIC_ROUTER
+    GLOBAL_DYNAMIC_ROUTER = router
+
 
 class LoRALayer(nn.Module):
     def __init__(self, r: int, lora_alpha: int, lora_dropout: float):
@@ -172,6 +179,9 @@ class MTLoRALinear(LoRALayer):
         trainable_scale_shared=False,
         trainable_scale_per_task=False,
         shared_mode: str = 'matrix',
+        dynamic_router=None,
+        layer_idx: int = -1,
+        max_dynamic_groups: int = 4,
         **kwargs,
     ):
         assert shared_mode in ['matrix', 'matrixv2',
@@ -195,6 +205,10 @@ class MTLoRALinear(LoRALayer):
             in_features, out_features, **kwargs)
 
         self.tasks = tasks
+        self.dynamic_router = dynamic_router if dynamic_router is not None else GLOBAL_DYNAMIC_ROUTER
+        self.layer_idx = layer_idx
+        self.max_dynamic_groups = max_dynamic_groups
+        self.dynamic_enabled = dynamic_router is not None and layer_idx >= 0 and layer_idx >= 2 and self.r_shared > 0
         self.shared_mode = shared_mode
         self.r_shared = int(r.get('shared', 0))
         self.r_tasks = {task: int(r.get(task, 0)) for task in (tasks or [])}
@@ -230,10 +244,20 @@ class MTLoRALinear(LoRALayer):
                 assert has_tasks
                 self.lora_norm = nn.LayerNorm(out_features)
             elif self.shared_mode == 'matrix' or self.shared_mode == 'matrixv2':
-                self.lora_shared_A = nn.Parameter(
-                    self.linear.weight.new_zeros((self.r_shared, in_features)))
-                self.lora_shared_B = nn.Parameter(
-                    self.linear.weight.new_zeros((out_features, self.r_shared)))
+                if self.dynamic_enabled:
+                    self.lora_group_A = nn.ParameterDict({
+                        f"g{i}": nn.Parameter(self.linear.weight.new_zeros((self.r_shared, in_features)))
+                        for i in range(max_dynamic_groups)
+                    })
+                    self.lora_group_B = nn.ParameterDict({
+                        f"g{i}": nn.Parameter(self.linear.weight.new_zeros((out_features, self.r_shared)))
+                        for i in range(max_dynamic_groups)
+                    })
+                else:
+                    self.lora_shared_A = nn.Parameter(
+                        self.linear.weight.new_zeros((self.r_shared, in_features)))
+                    self.lora_shared_B = nn.Parameter(
+                        self.linear.weight.new_zeros((out_features, self.r_shared)))
             else:
                 raise NotImplementedError
             if trainable_scale_shared:
@@ -257,6 +281,23 @@ class MTLoRALinear(LoRALayer):
                 nn.init.kaiming_uniform_(
                     self.lora_tasks_A[task], a=math.sqrt(5))
                 nn.init.zeros_(self.lora_tasks_B[task])
+        if hasattr(self, "lora_group_A"):
+            for key in self.lora_group_A.keys():
+                nn.init.kaiming_uniform_(self.lora_group_A[key], a=math.sqrt(5))
+                nn.init.zeros_(self.lora_group_B[key])
+
+    def clone_group(self, src_idx: int, dst_idx: int):
+        if not hasattr(self, "lora_group_A"):
+            return
+        src, dst = f"g{src_idx}", f"g{dst_idx}"
+        self.lora_group_A[dst].data.copy_(self.lora_group_A[src].data)
+        self.lora_group_B[dst].data.copy_(self.lora_group_B[src].data)
+
+    def branch_parameters(self, group_idx: int):
+        if not hasattr(self, "lora_group_A"):
+            return []
+        key = f"g{group_idx}"
+        return [self.lora_group_A[key], self.lora_group_B[key]]
 
     def merge(self):
         """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
@@ -281,8 +322,20 @@ class MTLoRALinear(LoRALayer):
 
         if self.has_shared_lora:
             if self.shared_mode == 'matrix':
-                lora = (x @ self.lora_shared_A.transpose(0, 1)
-                        @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
+                if self.dynamic_enabled and hasattr(self, "lora_group_A"):
+                    task_to_group = self.dynamic_router.task_to_group(self.layer_idx)
+                    lora_tasks = {}
+                    for task, gid in task_to_group.items():
+                        x_in = x if x_tasks is None else x_tasks.get(task, x)
+                        key = f"g{gid}"
+                        delta = (x_in @ self.lora_group_A[key].transpose(0, 1)
+                                 @ self.lora_group_B[key].transpose(0, 1)) * self.lora_shared_scale
+                        lora_tasks[task] = pretrained + delta
+                    lora = (x @ self.lora_group_A['g0'].transpose(0, 1)
+                            @ self.lora_group_B['g0'].transpose(0, 1)) * self.lora_shared_scale
+                else:
+                    lora = (x @ self.lora_shared_A.transpose(0, 1)
+                            @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
             elif self.shared_mode == 'matrixv2':
                 lora = (x @ self.lora_shared_A.transpose(0, 1)
                         @ self.lora_shared_B.transpose(0, 1)) * self.lora_shared_scale
