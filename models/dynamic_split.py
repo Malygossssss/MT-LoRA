@@ -8,6 +8,28 @@ class DynamicSplitRouter:
         self.max_groups = list(max_groups)
         self.enabled = enabled
         self.stage_groups = {s: [list(self.tasks)] for s in range(num_stages)}
+        self.split_history = []
+
+    @staticmethod
+    def _format_group(group):
+        return "[" + ", ".join(group) + "]"
+
+    def snapshot_stage_groups(self):
+        return {
+            stage_idx: [list(group) for group in self.stage_groups[stage_idx]]
+            for stage_idx in range(self.num_stages)
+        }
+
+    def format_stage_groups(self):
+        stage_text = []
+        for stage_idx in range(self.num_stages):
+            groups = self.stage_groups[stage_idx]
+            group_text = ", ".join(
+                f"G{group_idx}={self._format_group(group)}"
+                for group_idx, group in enumerate(groups)
+            )
+            stage_text.append(f"stage={stage_idx}: {group_text}")
+        return " | ".join(stage_text)
 
     def task_to_group(self, stage_idx):
         mapping = {}

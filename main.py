@@ -358,6 +358,7 @@ def main(config):
 
     # final eval
     validate(config, data_loader_val, model, epoch)
+    _log_online_split_summary(model, logger)
     total_time = time.perf_counter() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
@@ -499,12 +500,74 @@ def _collect_task_stage_grads(config, model, criterion, data_loader, stage_idx, 
     return {t: torch.stack(v, 0).mean(0) for t, v in task_grads.items() if v}
 
 
+def _get_online_split_backbone_and_router(model):
+    wrapped = model.module if hasattr(model, 'module') else model
+    backbone = wrapped.backbone if hasattr(wrapped, 'backbone') else None
+    router = getattr(backbone, 'dynamic_router', None) if backbone is not None else None
+    return backbone, router
+
+
+def _format_group(group):
+    return "[" + ", ".join(group) + "]"
+
+
+def _format_stage_groups(router):
+    if router is None:
+        return ""
+    if hasattr(router, 'format_stage_groups'):
+        return router.format_stage_groups()
+    stage_text = []
+    for stage_idx in sorted(router.stage_groups):
+        groups = router.stage_groups[stage_idx]
+        group_text = ", ".join(
+            f"G{group_idx}={_format_group(group)}"
+            for group_idx, group in enumerate(groups)
+        )
+        stage_text.append(f"stage={stage_idx}: {group_text}")
+    return " | ".join(stage_text)
+
+
+def _record_online_split(router, epoch, stage_idx, delta, before_group, group_a, group_b):
+    if router is None:
+        return
+    history = getattr(router, 'split_history', None)
+    if history is None:
+        history = []
+        router.split_history = history
+    history.append({
+        'epoch': int(epoch),
+        'stage_idx': int(stage_idx),
+        'delta': float(delta),
+        'before_group': list(before_group),
+        'group_a': list(group_a),
+        'group_b': list(group_b),
+        'stage_groups': router.snapshot_stage_groups() if hasattr(router, 'snapshot_stage_groups') else None,
+        'stage_groups_text': _format_stage_groups(router),
+    })
+
+
+def _log_online_split_summary(model, logger):
+    _, router = _get_online_split_backbone_and_router(model)
+    if router is None:
+        return
+    split_history = getattr(router, 'split_history', [])
+    if not split_history:
+        logger.info(f"[Ours][Summary] No online split was triggered. Final stage groups: {_format_stage_groups(router)}")
+        return
+    logger.info("[Ours][Summary] Online split history for this run:")
+    for record in split_history:
+        logger.info(
+            f"[Ours][Summary] epoch={record['epoch']}, stage={record['stage_idx']}, "
+            f"delta={record['delta']:.4f}, {_format_group(record['before_group'])} -> "
+            f"{_format_group(record['group_a'])} | {_format_group(record['group_b'])}"
+        )
+        logger.info(f"[Ours][Summary] epoch={record['epoch']} stage groups: {record['stage_groups_text']}")
+
+
 def _maybe_run_online_split(config, model, criterion, data_loader, optimizer, epoch, logger):
     if not (config.MODEL.MTLORA.ENABLED and config.MODEL.MTLORA.USE_OURS):
         return
-    wrapped = model.module if hasattr(model, 'module') else model
-    backbone = wrapped.backbone if hasattr(wrapped, 'backbone') else None
-    router = getattr(backbone, 'dynamic_router', None)
+    backbone, router = _get_online_split_backbone_and_router(model)
     if router is None:
         return
     warmup_epochs = max(1, int(config.TRAIN.EPOCHS * config.MODEL.MTLORA.OURS_WARMUP_RATIO))
@@ -530,14 +593,21 @@ def _maybe_run_online_split(config, model, criterion, data_loader, optimizer, ep
             delta, ga, gb = best
             if delta <= float(config.MODEL.MTLORA.OURS_DELTA_THRESHOLD):
                 continue
-            parent_idx, new_idx = router.apply_split(stage_idx, group, ga, gb)
+            before_group = list(group)
+            group_a = list(ga)
+            group_b = list(gb)
+            parent_idx, new_idx = router.apply_split(stage_idx, group, group_a, group_b)
             for m in backbone.modules():
                 if hasattr(m, 'layer_idx') and m.layer_idx == stage_idx and hasattr(m, 'clone_group'):
                     m.clone_group(parent_idx, new_idx)
             backbone._last_split_epoch = epoch
-            logger.info(f"[Ours] Split stage={stage_idx}, delta={delta:.4f}, {group} -> {ga}|{gb}")
+            _record_online_split(router, epoch, stage_idx, delta, before_group, group_a, group_b)
+            logger.info(
+                f"[Ours] Split epoch={epoch}, stage={stage_idx}, delta={delta:.4f}, "
+                f"{_format_group(before_group)} -> {_format_group(group_a)} | {_format_group(group_b)}"
+            )
+            logger.info(f"[Ours] Stage groups after split: {_format_stage_groups(router)}")
             return
-
 
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
     model.train()
