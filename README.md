@@ -168,6 +168,12 @@ python compute_delta_m.py \
 --csv-out csv/swin_base_patch4_window7_448_PASCAL_alltask.csv
 ```
 
+OR
+
+```bash
+python compute_delta_m.py --tasks semseg,human,saliency,normals --log-file output/swin_base_patch4_window7_448_PASCAL_alltask/default/log_rank0.txt --semseg-st 67.21 --human-st 61.93 --saliency-st 62.35 --normals-st 17.97 --csv-out csv/swin_base_patch4_window7_448_PASCAL_alltask.csv
+```
+
 #### NYUD 三任务示例
 
 ```bash
@@ -228,6 +234,28 @@ python scripts/label_stats.py \
 ```
 
 > 说明：当前仓库默认文件列表中未包含 `scripts/label_stats.py`。如果这是你的本地自定义脚本，可保留该命令用于统计标签分布。
+
+### 8) 测试训练开销
+
+```bash
+python scripts/benchmark_prompt_injection.py --configs 
+    configs/mtlora/tiny_448/promlora_tiny_448_r64_prom60_scale4_pertask.yaml \
+    configs/mtlora/tiny_448/mtlora_tiny_448_r64_scale4_pertask.yaml \
+    configs/mtlora/tiny_448/mtlora_tiny_448_r64_onlyta_scale4_pertask.yaml \
+    configs/swin/tiny_448/swin_tiny_patch4_window7_448.yaml \
+  --batch-size 1 \
+  --warmup-steps 50 \
+  --timed-steps 200 \
+  --tasks semseg,normals,sal,human_parts,edge \
+  --dataset pascal \
+  --data-path /path/to/pascal
+```
+OR
+```bash
+python scripts/benchmark_prompt_injection.py --configs configs/mtlora/tiny_448/promlora_tiny_448_r64_prom60_scale4_pertask.yaml configs/mtlora/tiny_448/mtlora_tiny_448_r64_scale4_pertask.yaml configs/mtlora/tiny_448/mtlora_tiny_448_r64_onlyta_scale4_pertask.yaml configs/swin/tiny_448/swin_tiny_patch4_window7_448.yaml --batch-size 1 --warmup-steps 50 --timed-steps 200 --tasks semseg,normals,sal,human_parts,edge --dataset pascal --data-path /path/to/pascal
+```
+
+> 说明：使用合成输入进行 warmup + timed 的 forward/backward/step 计时，并输出 sec/iter、it/s 和 peak memory 指标，方便比较 prompt 注入开销
 
 ---
 
