@@ -125,14 +125,16 @@ class HumanPartsMeter(object):
         return eval_result
 
 
-def eval_human_parts_predictions(database, save_dir, overfit=False):
+def eval_human_parts_predictions(database, save_dir, gt_root=None, overfit=False):
     """ Evaluate the human parts predictions that are stored in the save dir """
 
     # Dataloaders
     if database == 'PASCALContext':
-        from data.pascal_context import PASCALContext
+        from data.mtl_ds import PASCALContext
+        if gt_root is None:
+            raise ValueError('gt_root must be provided for PASCAL human-parts evaluation')
         gt_set = 'val'
-        db = PASCALContext(split=gt_set, do_edge=False, do_human_parts=True, do_semseg=False,
+        db = PASCALContext(root=gt_root, split=gt_set, do_edge=False, do_human_parts=True, do_semseg=False,
                                           do_normals=False, do_sal=False, overfit=overfit)
     
     else:
