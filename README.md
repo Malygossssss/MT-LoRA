@@ -275,6 +275,12 @@ Offline edge evaluation uses the same pure Python metric implementation as onlin
 python scripts/eval_edge_predictions.py --dataset nyud --pred-dir /path/to/predictions --gt-root /path/to/NYUD_MT
 ```
 
+If you already have a prepared `NYUD_MT` root and only need to replace placeholder edge labels with segmentation-derived ones:
+
+```bash
+python scripts/derive_nyud_edge_from_semseg.py --dataset-root /path/to/NYUD_MT --replace-edge --overwrite
+```
+
 Note: derived semantic-boundary edges are useful for training and internal comparison, but they are not equivalent to an official independent NYUD edge benchmark.
 
 ## Authorship
