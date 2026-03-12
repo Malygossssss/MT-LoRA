@@ -2,7 +2,7 @@ DATA:
   IMG_SIZE: 448
 MODEL:
   TYPE: swin
-  NAME: promlora_tiny_448_r64_prom60_scale4_pertask_nyud
+  NAME: promlora_tiny_448_r64_prom50_scale4_pertask_nyud
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
@@ -37,7 +37,7 @@ MODEL:
   PROMPT:
     INITIATION: random
     ENABLED: True
-    NUM_TOKENS: 60
+    NUM_TOKENS: 50
     DEEP: True
     DROPOUT: 0.0
   DECODER_HEAD:
