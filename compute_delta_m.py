@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -14,6 +15,15 @@ PAPER_ST_DEFAULTS = {
     "saliency_miou": 62.35,
     "normals_mean": 17.97,
     "depth_rmse": 0.6436,
+}
+
+METRIC_PRECISIONS = {
+    "semseg_miou": 2,
+    "human_miou": 2,
+    "saliency_miou": 2,
+    "normals_mean": 2,
+    "depth_rmse": 4,
+    "edge_odsf": 4,
 }
 
 TASK_SPECS = {
@@ -66,6 +76,17 @@ RE_DEPTH_HEADER = re.compile(r"Results for (Depth Estimation|depth prediction)",
 RE_DEPTH_RMSE = re.compile(r"\brmse\s*:?\s*([0-9.]+)", re.IGNORECASE)
 RE_EDGE_HEADER = re.compile(r"Edge Detection Evaluation")
 RE_EDGE_ODSF = re.compile(r"\bodsF:\s*([0-9.]+)", re.IGNORECASE)
+
+
+def round_metric_value(metric: str, value_text: str) -> float:
+    precision = METRIC_PRECISIONS[metric]
+    quantizer = Decimal("1").scaleb(-precision)
+    rounded = Decimal(value_text).quantize(quantizer, rounding=ROUND_HALF_UP)
+    return float(rounded)
+
+
+def format_metric_value(metric: str, value: float) -> str:
+    return f"{value:.{METRIC_PRECISIONS[metric]}f}"
 
 
 def parse_tasks(task_text: str) -> List[str]:
@@ -201,20 +222,20 @@ def parse_log(log_path: Path, tasks: List[str]) -> List[Dict[str, float]]:
 
             semseg_match = RE_SEMSEG.search(line)
             if semseg_match:
-                buffer["semseg_miou"] = float(semseg_match.group(1))
+                buffer["semseg_miou"] = round_metric_value("semseg_miou", semseg_match.group(1))
                 maybe_flush()
                 continue
 
             human_match = RE_HUMAN.search(line)
             if human_match:
-                buffer["human_miou"] = float(human_match.group(1))
+                buffer["human_miou"] = round_metric_value("human_miou", human_match.group(1))
                 maybe_flush()
                 continue
 
             if in_saliency:
                 saliency_match = RE_SALIENCY_MIOU.search(line)
                 if saliency_match:
-                    buffer["saliency_miou"] = float(saliency_match.group(1))
+                    buffer["saliency_miou"] = round_metric_value("saliency_miou", saliency_match.group(1))
                     in_saliency = False
                     maybe_flush()
                     continue
@@ -222,7 +243,7 @@ def parse_log(log_path: Path, tasks: List[str]) -> List[Dict[str, float]]:
             if in_normals:
                 normals_match = RE_NORMALS_MEAN.search(line)
                 if normals_match:
-                    buffer["normals_mean"] = float(normals_match.group(1))
+                    buffer["normals_mean"] = round_metric_value("normals_mean", normals_match.group(1))
                     in_normals = False
                     maybe_flush()
                     continue
@@ -230,7 +251,7 @@ def parse_log(log_path: Path, tasks: List[str]) -> List[Dict[str, float]]:
             if in_depth:
                 depth_match = RE_DEPTH_RMSE.search(line)
                 if depth_match:
-                    buffer["depth_rmse"] = float(depth_match.group(1))
+                    buffer["depth_rmse"] = round_metric_value("depth_rmse", depth_match.group(1))
                     in_depth = False
                     maybe_flush()
                     continue
@@ -238,7 +259,7 @@ def parse_log(log_path: Path, tasks: List[str]) -> List[Dict[str, float]]:
             if in_edge:
                 edge_match = RE_EDGE_ODSF.search(line)
                 if edge_match:
-                    buffer["edge_odsf"] = float(edge_match.group(1))
+                    buffer["edge_odsf"] = round_metric_value("edge_odsf", edge_match.group(1))
                     in_edge = False
                     maybe_flush()
                     continue
@@ -264,7 +285,8 @@ def main():
     for epoch, delta_m, current in rows:
         epoch_label = f"epoch {epoch}" if epoch is not None and epoch >= 0 else "epoch N/A"
         metrics = ", ".join(
-            f"{TASK_SPECS[task]['display']} {current[TASK_SPECS[task]['metric']]:.4f}"
+            f"{TASK_SPECS[task]['display']} "
+            f"{format_metric_value(TASK_SPECS[task]['metric'], current[TASK_SPECS[task]['metric']])}"
             for task in args.tasks
         )
         print(f"- {epoch_label}: Delta m = {delta_m:.3f}% | {metrics}")
@@ -275,7 +297,7 @@ def main():
     print(f"Delta m: {best_delta_m:.3f}%")
     for task in args.tasks:
         metric = TASK_SPECS[task]["metric"]
-        print(f"{TASK_SPECS[task]['display']}: {best_metrics[metric]:.4f}")
+        print(f"{TASK_SPECS[task]['display']}: {format_metric_value(metric, best_metrics[metric])}")
 
     if args.csv_out is not None:
         with args.csv_out.open("w", newline="", encoding="utf-8") as handle:
@@ -283,13 +305,25 @@ def main():
             headers = [TASK_SPECS[task]["display"].replace(" ", "_") for task in args.tasks]
             writer.writerow(["epoch", *headers, "Delta_m_percent"])
             for epoch, delta_m, current in rows:
-                writer.writerow([epoch, *[current[TASK_SPECS[task]["metric"]] for task in args.tasks], delta_m])
+                writer.writerow(
+                    [
+                        epoch,
+                        *[
+                            format_metric_value(TASK_SPECS[task]["metric"], current[TASK_SPECS[task]["metric"]])
+                            for task in args.tasks
+                        ],
+                        f"{delta_m:.3f}",
+                    ]
+                )
             writer.writerow([])
             writer.writerow(
                 [
                     f"BEST(epoch {best_epoch})",
-                    *[best_metrics[TASK_SPECS[task]["metric"]] for task in args.tasks],
-                    best_delta_m,
+                    *[
+                        format_metric_value(TASK_SPECS[task]["metric"], best_metrics[TASK_SPECS[task]["metric"]])
+                        for task in args.tasks
+                    ],
+                    f"{best_delta_m:.3f}",
                 ]
             )
         print(f"\nCSV written to: {args.csv_out}")
