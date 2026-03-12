@@ -104,13 +104,15 @@ class DepthMeter(object):
         return eval_result
         
 
-def eval_depth_predictions(database, save_dir, overfit=False):
+def eval_depth_predictions(database, save_dir, gt_root=None, overfit=False):
 
     # Dataloaders
     if database == 'NYUD':
-        from data.nyud import NYUD_MT 
+        from data.mtl_ds import NYUD_MT
+        if gt_root is None:
+            raise ValueError('gt_root must be provided for NYUD depth evaluation')
         gt_set = 'val'
-        db = NYUD_MT(split=gt_set, do_depth=True, overfit=overfit)
+        db = NYUD_MT(root=gt_root, split=gt_set, do_depth=True, overfit=overfit)
     
     else:
         raise NotImplementedError

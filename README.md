@@ -243,6 +243,46 @@ CUDA_VISIBLE_DEVICES=1 python -m torch.distributed.launch --nproc_per_node 1 --m
 
 ---
 
+## NYUD Edge Support
+
+NYUD edge is now supported as a first-class task for training, validation, and offline evaluation.
+
+- Training labels live under `edge/<image_id>.npy` as float32 binary edge maps.
+- Optional multi-annotator evaluation GT lives under `edge_eval/<image_id>.npz` with key `gts`.
+- If `edge_eval/` is missing, formal edge evaluation falls back to `edge/`.
+
+Prepare NYUDv2 with real edge GT when available:
+
+```bash
+python scripts/prepare_nyudv2.py --src /path/to/nyud_raw --dst /path/to/NYUD_MT --edge-source real --edge-root /path/to/nyud_edge_gt --edge-format auto --overwrite
+```
+
+Prepare NYUDv2 by deriving edges from semantic boundaries:
+
+```bash
+python scripts/prepare_nyudv2.py --src /path/to/nyud_raw --dst /path/to/NYUD_MT --edge-source derived --overwrite
+```
+
+Run NYUD four-task training or evaluation:
+
+```bash
+python -m torch.distributed.launch --nproc_per_node 1 main.py --cfg configs/mtlora/tiny_448/nyud/mtlora_tiny_448_r64_scale4_pertask_nyud.yaml --nyud /path/to/NYUD_MT --tasks semseg,normals,depth,edge --batch-size 8 --resume-backbone ./backbone/swin_tiny_patch4_window7_224.pth
+```
+
+Offline edge evaluation uses the same pure Python metric implementation as online validation:
+
+```bash
+python scripts/eval_edge_predictions.py --dataset nyud --pred-dir /path/to/predictions --gt-root /path/to/NYUD_MT
+```
+
+If you already have a prepared `NYUD_MT` root and only need to replace placeholder edge labels with segmentation-derived ones:
+
+```bash
+python scripts/derive_nyud_edge_from_semseg.py --dataset-root /path/to/NYUD_MT --replace-edge --overwrite
+```
+
+Note: derived semantic-boundary edges are useful for training and internal comparison, but they are not equivalent to an official independent NYUD edge benchmark.
+
 ## Authorship
 
 Since the release commit is squashed, the GitHub contributors tab doesn't reflect the authors' contributions. The following authors contributed equally to this codebase:

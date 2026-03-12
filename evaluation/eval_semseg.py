@@ -146,27 +146,31 @@ class SemsegMeter(object):
         return eval_result
 
 
-def eval_semseg_predictions(database, save_dir, overfit=False):
+def eval_semseg_predictions(database, save_dir, gt_root=None, overfit=False):
     """ Evaluate the segmentation maps that are stored in the save dir """
 
     # Dataloaders
     if database == 'PASCALContext':
-        from data.pascal_context import PASCALContext
+        from data.mtl_ds import PASCALContext
+        if gt_root is None:
+            raise ValueError('gt_root must be provided for PASCAL semantic segmentation evaluation')
         n_classes = 20
         cat_names = VOC_CATEGORY_NAMES
         has_bg = True
         gt_set = 'val'
-        db = PASCALContext(split=gt_set, do_edge=False, do_human_parts=False, do_semseg=True,
+        db = PASCALContext(root=gt_root, split=gt_set, do_edge=False, do_human_parts=False, do_semseg=True,
                            do_normals=False, overfit=overfit)
         ignore_index = 255
 
     elif database == 'NYUD':
-        from data.nyud import NYUD_MT
+        from data.mtl_ds import NYUD_MT
+        if gt_root is None:
+            raise ValueError('gt_root must be provided for NYUD semantic segmentation evaluation')
         n_classes = 40
         cat_names = NYU_CATEGORY_NAMES
         has_bg = False
         gt_set = 'val'
-        db = NYUD_MT(split=gt_set, do_semseg=True, overfit=overfit)
+        db = NYUD_MT(root=gt_root, split=gt_set, do_semseg=True, overfit=overfit)
         ignore_index = 255
 
     else:

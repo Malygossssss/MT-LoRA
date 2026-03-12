@@ -73,8 +73,13 @@ def calculate_multi_task_performance(eval_dict, single_task_dict):
         elif task == 'normals':  # mean error lower is better
             mtl_performance -= (mtl['mean'] - stl['mean'])/stl['mean']
 
-        elif task == 'edge':  # odsF higher is better
-            mtl_performance += (mtl['odsF'] - stl['odsF'])/stl['odsF']
+        elif task == 'edge':
+            if 'odsF' in mtl and 'odsF' in stl:  # preferred formal metric
+                mtl_performance += (mtl['odsF'] - stl['odsF'])/stl['odsF']
+            elif 'loss' in mtl and 'loss' in stl:  # fallback for legacy runs
+                mtl_performance -= (mtl['loss'] - stl['loss'])/stl['loss']
+            else:
+                raise KeyError('edge metrics must contain odsF or loss')
 
         else:
             raise NotImplementedError
@@ -106,12 +111,9 @@ def get_single_task_meter(config, task, database="NYUD"):
         from evaluation.eval_depth import DepthMeter
         return DepthMeter()
 
-    # Single task performance meter uses the loss (True evaluation is based on seism evaluation)
     elif task == 'edge':
         from evaluation.eval_edge import EdgeMeter
-        # TODO: get edge_w from task config
         return EdgeMeter(pos_weight=0.95)
-        # return EdgeMeter()
 
     else:
         raise NotImplementedError

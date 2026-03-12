@@ -2,7 +2,7 @@ DATA:
   IMG_SIZE: 448
 MODEL:
   TYPE: swin
-  NAME: promlora_tiny_448_r64_prom60_scale4_pertask_nyud
+  NAME: ema_gated_mtlora_tiny_448_r64_ts4_stage_last_shared_bias
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
@@ -13,7 +13,6 @@ MODEL:
     ENABLED: True
     R: [64, 64, 64, 64]
     SHARED_SCALE: [4.0]
-    SHARED_MODE: lora_only        # from mtlora_tiny_448_r64_onlyta_scale4_pertask.yaml
     TASK_SCALE: [4.0]
     DROPOUT: [0.05, 0.05, 0.05, 0.05]
     TRAINABLE_SCALE_SHARED: False
@@ -26,20 +25,24 @@ MODEL:
     FC1_ENABLED: True
     FC2_ENABLED: True
     DOWNSAMPLER_ENABLED: False
+    EMA_GATE:
+      ENABLED: True
+      GRANULARITY: stage_last
+      EMA_DECAY: 0.9
+      ALPHA_SHARED_INIT: 0.8
+      ALPHA_SPECIFIC_INIT: 0.2
+      ALPHA_MIN: 0.4
+      ALPHA_MAX: 0.9
+      UPDATE_EVERY_EPOCH: 1
+      LOG_HISTORY: True
     R_PER_TASK:
-      semseg: [0]
-      normals: [0]
-      sal: [0]
-      human_parts: [0]
-      edge: [0]
-      depth: [0]
+      semseg: [4]
+      normals: [4]
+      sal: [4]
+      human_parts: [4]
+      edge: [4]
+      depth: [4]
       shared: [64]
-  PROMPT:
-    INITIATION: random
-    ENABLED: True
-    NUM_TOKENS: 60
-    DEEP: True
-    DROPOUT: 0.0
   DECODER_HEAD:
     semseg: hrnet
     normals: hrnet

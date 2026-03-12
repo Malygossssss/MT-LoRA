@@ -8,7 +8,7 @@ TASK_METRIC_INFO = {
     'semseg': ('mIoU', True),
     'human_parts': ('mIoU', True),
     'sal': ('mIoU', True),
-    'edge': ('loss', False),
+    'edge': ('odsF', True),
     'depth': ('rmse', False),
     'normals': ('rmse', False),
 }
@@ -22,7 +22,10 @@ def extract_task_metrics(eval_results, tasks):
     """
     metrics = {}
     for t in tasks:
-        key, higher_is_better = TASK_METRIC_INFO.get(t, ('mIoU', True))
+        if t == 'edge' and t in eval_results and 'odsF' not in eval_results[t]:
+            key, higher_is_better = ('loss', False)
+        else:
+            key, higher_is_better = TASK_METRIC_INFO.get(t, ('mIoU', True))
         if t in eval_results and key in eval_results[t]:
             val = eval_results[t][key]
             metrics[t] = val if higher_is_better else -val
