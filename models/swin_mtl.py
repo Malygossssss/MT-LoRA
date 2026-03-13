@@ -256,6 +256,19 @@ class MultiTaskSwin(nn.Module):
         result = self.decoders(shared_ft)
         return result
 
+    def get_principal_angle_regularization(self, **kwargs):
+        if hasattr(self.backbone, "get_principal_angle_regularization"):
+            return self.backbone.get_principal_angle_regularization(**kwargs)
+
+        ref_param = next(self.parameters())
+        zero = ref_param.new_zeros((), dtype=torch.float32)
+        return {
+            "loss_total": zero,
+            "loss_col": zero,
+            "loss_row": zero,
+            "num_terms": 0,
+        }
+
     def freeze_all(self):
         for param in self.parameters():
             param.requires_grad = False

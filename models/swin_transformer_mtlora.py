@@ -73,6 +73,7 @@ class Mlp(nn.Module):
             )
         else:
             self.fc1 = CompatLinear(in_features, hidden_features)
+        self.fc1.principal_angle_candidate = bool(lora)
         self.act = act_layer()
         if mtlora.FC2_ENABLED:
             self.fc2 = linear_cls(
@@ -89,6 +90,7 @@ class Mlp(nn.Module):
             )
         else:
             self.fc2 = CompatLinear(hidden_features, out_features)
+        self.fc2.principal_angle_candidate = bool(lora)
         self.tasks = tasks
         self.drop = nn.Dropout(drop)
 
@@ -239,6 +241,7 @@ class WindowAttention(nn.Module):
             )
         else:
             self.proj = CompatLinear(dim, dim)
+        self.proj.principal_angle_candidate = bool(lora)
 
         self.tasks = tasks
         self.proj_drop = nn.Dropout(proj_drop)
@@ -833,6 +836,72 @@ class SwinTransformerMTLoRA(nn.Module):
         x = self.forward_features(x, return_stages, flatten_ft)
         x = self.head(x)
         return x
+
+    def get_principal_angle_regularization(
+        self,
+        mode=None,
+        w_col=None,
+        w_row=None,
+        eps=None,
+        reduction=None,
+    ):
+        ref_param = next(self.parameters())
+        zero = ref_param.new_zeros((), dtype=torch.float32)
+        stats = {
+            "loss_total": zero,
+            "loss_col": zero,
+            "loss_row": zero,
+            "num_terms": 0,
+        }
+
+        if self.mtlora is None:
+            return stats
+
+        mode = (mode or getattr(self.mtlora, "PRINCIPAL_ANGLE_MODE", "both")).lower()
+        reduction = (reduction or getattr(self.mtlora, "PRINCIPAL_ANGLE_REDUCTION", "mean")).lower()
+        w_col = float(getattr(self.mtlora, "PRINCIPAL_ANGLE_W_COL", 1.0) if w_col is None else w_col)
+        w_row = float(getattr(self.mtlora, "PRINCIPAL_ANGLE_W_ROW", 1.0) if w_row is None else w_row)
+        eps = float(getattr(self.mtlora, "PRINCIPAL_ANGLE_EPS", 1e-12) if eps is None else eps)
+
+        if reduction != "mean":
+            raise ValueError(f"Unsupported principal angle reduction: {reduction}")
+
+        loss_total = zero
+        loss_col = zero
+        loss_row = zero
+        num_terms = 0
+
+        for module in self.modules():
+            if not isinstance(module, MTLoRALinear):
+                continue
+            if not getattr(module, "principal_angle_candidate", False):
+                continue
+
+            module_stats = module.get_principal_angle_regularization(
+                mode=mode,
+                w_col=w_col,
+                w_row=w_row,
+                eps=eps,
+            )
+            module_terms = int(module_stats["num_terms"])
+            if module_terms <= 0:
+                continue
+
+            loss_total = loss_total + (module_stats["loss_total"] * module_terms)
+            loss_col = loss_col + (module_stats["loss_col"] * module_terms)
+            loss_row = loss_row + (module_stats["loss_row"] * module_terms)
+            num_terms += module_terms
+
+        if num_terms == 0:
+            return stats
+
+        inv_num_terms = 1.0 / float(num_terms)
+        return {
+            "loss_total": loss_total * inv_num_terms,
+            "loss_col": loss_col * inv_num_terms,
+            "loss_row": loss_row * inv_num_terms,
+            "num_terms": num_terms,
+        }
 
     def flops(self, images=None, logger=None, detailed=False):
         flops = 0

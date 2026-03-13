@@ -492,6 +492,28 @@ def _compute_conflict_ratio(loss_dict, shared_params, task_order, task_weights):
     return float(sum(ratios) / len(ratios))
 
 
+def _is_principal_angle_reg_enabled(config):
+    return bool(
+        config.MTL
+        and config.MODEL.MTLORA.ENABLED
+        and getattr(config.MODEL.MTLORA, 'ENABLE_PRINCIPAL_ANGLE_REG', False)
+    )
+
+
+def _compute_effective_principal_angle_lambda(config, epoch, step_idx, num_steps):
+    lambda_pa = float(getattr(config.MODEL.MTLORA, 'PRINCIPAL_ANGLE_LAMBDA', 0.0))
+    warmup_epochs = int(getattr(config.MODEL.MTLORA, 'PRINCIPAL_ANGLE_WARMUP_EPOCHS', 0))
+    if lambda_pa <= 0.0:
+        return 0.0
+    if warmup_epochs <= 0:
+        return lambda_pa
+
+    step_progress = float(step_idx) / float(max(num_steps, 1))
+    progress = (float(epoch) + step_progress) / float(warmup_epochs)
+    progress = min(max(progress, 0.0), 1.0)
+    return lambda_pa * progress
+
+
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, task=None, teacher=None):
     model.train()
     optimizer.zero_grad()
@@ -501,12 +523,24 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     loss_meter = AverageMeter()
     norm_meter = AverageMeter()
     scaler_meter = AverageMeter()
+    pa_total_meter = AverageMeter()
+    pa_col_meter = AverageMeter()
+    pa_row_meter = AverageMeter()
+    pa_lambda_meter = AverageMeter()
 
     performance_meter = PerformanceMeter(config, config.DATA.DBNAME)
 
     start = time.perf_counter()
     end = time.perf_counter()
     loss_dict = None
+    pa_stats = None
+
+    pa_model = model.module if hasattr(model, 'module') else model
+    principal_angle_enabled = _is_principal_angle_reg_enabled(config)
+    if principal_angle_enabled and not hasattr(pa_model, 'get_principal_angle_regularization'):
+        principal_angle_enabled = False
+        if dist.get_rank() == 0:
+            logger.warning("Principal-angle regularization disabled because model does not expose the required interface.")
 
     compute_cr = bool(config.MTL and config.TRAIN.ENABLE_CONFLICT_RATIO and hasattr(criterion, 'loss_weights'))
     shared_params_for_cr = None
@@ -559,6 +593,20 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             outputs = model(samples)
             loss, loss_dict = criterion(outputs, targets)
+
+        effective_lambda_pa = 0.0
+        pa_stats = None
+        if principal_angle_enabled:
+            effective_lambda_pa = _compute_effective_principal_angle_lambda(
+                config, epoch, idx, num_steps)
+            pa_stats = pa_model.get_principal_angle_regularization(
+                mode=config.MODEL.MTLORA.PRINCIPAL_ANGLE_MODE,
+                w_col=config.MODEL.MTLORA.PRINCIPAL_ANGLE_W_COL,
+                w_row=config.MODEL.MTLORA.PRINCIPAL_ANGLE_W_ROW,
+                eps=config.MODEL.MTLORA.PRINCIPAL_ANGLE_EPS,
+                reduction=config.MODEL.MTLORA.PRINCIPAL_ANGLE_REDUCTION,
+            )
+            loss = loss + (pa_stats["loss_total"] * effective_lambda_pa)
 
         if config.DEBUG_REPRO_STEPS > 0 and idx < config.DEBUG_REPRO_STEPS and dist.get_rank() == 0:
             sample_mean = float(samples.mean().item())
@@ -653,6 +701,11 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if grad_norm is not None:  # loss_scaler return None if not update
             norm_meter.update(grad_norm)
         scaler_meter.update(loss_scale_value)
+        if principal_angle_enabled and pa_stats is not None:
+            pa_total_meter.update(float(pa_stats["loss_total"].detach().item()))
+            pa_col_meter.update(float(pa_stats["loss_col"].detach().item()))
+            pa_row_meter.update(float(pa_stats["loss_row"].detach().item()))
+            pa_lambda_meter.update(float(effective_lambda_pa))
         batch_time.update(time.perf_counter() - end)
         end = time.perf_counter()
         if wandb_available:
@@ -674,6 +727,15 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             if loss_dict is not None:
                 for task, task_loss in loss_dict.items():
                     metrics[f"train/tasks/{task}/loss"] = task_loss.item()
+            if principal_angle_enabled and pa_stats is not None:
+                metrics["train/loss_pa_total"] = pa_total_meter.val
+                metrics["train/loss_pa_total_avg"] = pa_total_meter.avg
+                metrics["train/loss_pa_col"] = pa_col_meter.val
+                metrics["train/loss_pa_col_avg"] = pa_col_meter.avg
+                metrics["train/loss_pa_row"] = pa_row_meter.val
+                metrics["train/loss_pa_row_avg"] = pa_row_meter.avg
+                metrics["train/effective_lambda_pa"] = pa_lambda_meter.val
+                metrics["train/effective_lambda_pa_avg"] = pa_lambda_meter.avg
             wandb.log(metrics)
 
         if idx % config.PRINT_FREQ == 0:
@@ -681,11 +743,20 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             wd = optimizer.param_groups[0]['weight_decay']
             memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
             etas = batch_time.avg * (num_steps - idx)
+            pa_log = ""
+            if principal_angle_enabled and pa_stats is not None:
+                pa_log = (
+                    f'loss_pa_total {pa_total_meter.val:.6f} ({pa_total_meter.avg:.6f})\t'
+                    f'loss_pa_col {pa_col_meter.val:.6f} ({pa_col_meter.avg:.6f})\t'
+                    f'loss_pa_row {pa_row_meter.val:.6f} ({pa_row_meter.avg:.6f})\t'
+                    f'lambda_pa {pa_lambda_meter.val:.6f} ({pa_lambda_meter.avg:.6f})\t'
+                )
             logger.info(
                 f'Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
                 f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
                 f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
                 f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
+                f'{pa_log}'
                 f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
                 f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
                 f'mem {memory_used:.0f}MB')

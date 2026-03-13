@@ -196,6 +196,7 @@ class MTLoRALinear(LoRALayer):
 
         self.tasks = tasks
         self.shared_mode = shared_mode
+        self.principal_angle_candidate = False
         self.r_shared = int(r.get('shared', 0))
         self.r_tasks = {task: int(r.get(task, 0)) for task in (tasks or [])}
         self.has_shared_lora = self.r_shared > 0
@@ -257,6 +258,126 @@ class MTLoRALinear(LoRALayer):
                 nn.init.kaiming_uniform_(
                     self.lora_tasks_A[task], a=math.sqrt(5))
                 nn.init.zeros_(self.lora_tasks_B[task])
+
+    def _principal_angle_zero(self) -> torch.Tensor:
+        return self.linear.weight.new_zeros((), dtype=torch.float32)
+
+    def _supports_principal_angle_regularization(self) -> bool:
+        return (
+            self.has_shared_lora
+            and self.has_task_lora
+            and self.shared_mode in {"matrix", "matrixv2"}
+            and hasattr(self, "lora_shared_A")
+            and hasattr(self, "lora_shared_B")
+            and hasattr(self, "lora_tasks_A")
+            and hasattr(self, "lora_tasks_B")
+        )
+
+    def _orthogonal_basis(self, matrix: torch.Tensor, eps: float) -> Optional[torch.Tensor]:
+        if matrix is None or matrix.numel() == 0:
+            return None
+
+        matrix_fp32 = matrix.float()
+        if not bool(torch.isfinite(matrix_fp32).all()):
+            return None
+
+        if bool(torch.linalg.matrix_norm(matrix_fp32) < eps):
+            return None
+
+        q, _ = torch.linalg.qr(matrix_fp32, mode='reduced')
+        if not bool(torch.isfinite(q).all()):
+            return None
+        return q
+
+    def _principal_angle_overlap_loss(
+        self,
+        ta_matrix: torch.Tensor,
+        ts_matrix: torch.Tensor,
+        ts_rank: int,
+        eps: float,
+    ) -> torch.Tensor:
+        zero = self._principal_angle_zero()
+        if ts_rank <= 0:
+            return zero
+
+        q_ta = self._orthogonal_basis(ta_matrix, eps)
+        q_ts = self._orthogonal_basis(ts_matrix, eps)
+        if q_ta is None or q_ts is None:
+            return zero
+
+        overlap = q_ta.transpose(0, 1) @ q_ts
+        loss = overlap.pow(2).sum() / float(ts_rank)
+        if not bool(torch.isfinite(loss)):
+            return zero
+        return loss
+
+    def get_principal_angle_regularization(
+        self,
+        mode: str = "both",
+        w_col: float = 1.0,
+        w_row: float = 1.0,
+        eps: float = 1e-12,
+    ) -> Dict[str, Union[torch.Tensor, int]]:
+        zero = self._principal_angle_zero()
+        stats = {
+            "loss_total": zero,
+            "loss_col": zero,
+            "loss_row": zero,
+            "num_terms": 0,
+        }
+        if mode not in {"col", "row", "both"}:
+            raise ValueError(f"Unsupported principal angle mode: {mode}")
+        if eps <= 0:
+            raise ValueError("Principal angle epsilon must be positive.")
+        if not self._supports_principal_angle_regularization():
+            return stats
+
+        loss_total = zero
+        loss_col = zero
+        loss_row = zero
+        num_terms = 0
+
+        for task, task_a in self.lora_tasks_A.items():
+            task_rank = int(self.r_tasks.get(task, task_a.shape[0]))
+            if task_rank <= 0:
+                continue
+
+            task_b = self.lora_tasks_B[task]
+            term_col = self._principal_angle_overlap_loss(
+                self.lora_shared_B,
+                task_b,
+                task_rank,
+                eps,
+            )
+            term_row = self._principal_angle_overlap_loss(
+                self.lora_shared_A.transpose(0, 1),
+                task_a.transpose(0, 1),
+                task_rank,
+                eps,
+            )
+
+            if mode == "col":
+                term_total = term_col
+            elif mode == "row":
+                term_total = term_row
+            else:
+                term_total = (float(w_col) * term_col) + (float(w_row) * term_row)
+
+            loss_total = loss_total + term_total
+            loss_col = loss_col + term_col
+            loss_row = loss_row + term_row
+            num_terms += 1
+
+        if num_terms == 0:
+            return stats
+
+        inv_num_terms = 1.0 / float(num_terms)
+        return {
+            "loss_total": loss_total * inv_num_terms,
+            "loss_col": loss_col * inv_num_terms,
+            "loss_row": loss_row * inv_num_terms,
+            "num_terms": num_terms,
+        }
 
     def merge(self):
         """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
