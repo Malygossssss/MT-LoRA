@@ -313,12 +313,22 @@ def get_grad_norm(parameters, norm_type=2):
 
 
 def auto_resume_helper(output_dir):
-    checkpoints = os.listdir(output_dir)
-    checkpoints = [ckpt for ckpt in checkpoints if ckpt.endswith('pth')]
+    checkpoints = [
+        os.path.join(output_dir, ckpt)
+        for ckpt in os.listdir(output_dir)
+        if ckpt.endswith('pth')
+    ]
+    for entry in os.scandir(output_dir):
+        if not entry.is_dir() or not entry.name.startswith('run_'):
+            continue
+        checkpoints.extend(
+            os.path.join(entry.path, ckpt)
+            for ckpt in os.listdir(entry.path)
+            if ckpt.endswith('pth')
+        )
     print(f"All checkpoints founded in {output_dir}: {checkpoints}")
     if len(checkpoints) > 0:
-        latest_checkpoint = max([os.path.join(output_dir, d)
-                                for d in checkpoints], key=os.path.getmtime)
+        latest_checkpoint = max(checkpoints, key=os.path.getmtime)
         print(f"The latest checkpoint founded: {latest_checkpoint}")
         resume_file = latest_checkpoint
     else:

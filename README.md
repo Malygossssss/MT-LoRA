@@ -83,7 +83,7 @@ python -m torch.distributed.launch \
 默认输出在 `output/` 下，通常结构类似：
 
 ```text
-output/<exp_name>/<tag>/
+output/<exp_name>/<tag>/run_<timestamp>/
   ├── log_rank0.txt
   ├── ckpt_epoch_xxx.pth
   └── ...
