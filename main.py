@@ -502,14 +502,19 @@ def _is_principal_angle_reg_enabled(config):
 
 def _compute_effective_principal_angle_lambda(config, epoch, step_idx, num_steps):
     lambda_pa = float(getattr(config.MODEL.MTLORA, 'PRINCIPAL_ANGLE_LAMBDA', 0.0))
+    start_epoch = int(getattr(config.MODEL.MTLORA, 'PRINCIPAL_ANGLE_START_EPOCH', 0))
     warmup_epochs = int(getattr(config.MODEL.MTLORA, 'PRINCIPAL_ANGLE_WARMUP_EPOCHS', 0))
     if lambda_pa <= 0.0:
+        return 0.0
+
+    step_progress = float(step_idx) / float(max(num_steps, 1))
+    epoch_progress = float(epoch) + step_progress
+    if epoch_progress < float(start_epoch):
         return 0.0
     if warmup_epochs <= 0:
         return lambda_pa
 
-    step_progress = float(step_idx) / float(max(num_steps, 1))
-    progress = (float(epoch) + step_progress) / float(warmup_epochs)
+    progress = (epoch_progress - float(start_epoch)) / float(warmup_epochs)
     progress = min(max(progress, 0.0), 1.0)
     return lambda_pa * progress
 
@@ -599,14 +604,23 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if principal_angle_enabled:
             effective_lambda_pa = _compute_effective_principal_angle_lambda(
                 config, epoch, idx, num_steps)
-            pa_stats = pa_model.get_principal_angle_regularization(
-                mode=config.MODEL.MTLORA.PRINCIPAL_ANGLE_MODE,
-                w_col=config.MODEL.MTLORA.PRINCIPAL_ANGLE_W_COL,
-                w_row=config.MODEL.MTLORA.PRINCIPAL_ANGLE_W_ROW,
-                eps=config.MODEL.MTLORA.PRINCIPAL_ANGLE_EPS,
-                reduction=config.MODEL.MTLORA.PRINCIPAL_ANGLE_REDUCTION,
-            )
-            loss = loss + (pa_stats["loss_total"] * effective_lambda_pa)
+            if effective_lambda_pa > 0.0:
+                pa_stats = pa_model.get_principal_angle_regularization(
+                    mode=config.MODEL.MTLORA.PRINCIPAL_ANGLE_MODE,
+                    w_col=config.MODEL.MTLORA.PRINCIPAL_ANGLE_W_COL,
+                    w_row=config.MODEL.MTLORA.PRINCIPAL_ANGLE_W_ROW,
+                    eps=config.MODEL.MTLORA.PRINCIPAL_ANGLE_EPS,
+                    reduction=config.MODEL.MTLORA.PRINCIPAL_ANGLE_REDUCTION,
+                )
+                loss = loss + (pa_stats["loss_total"] * effective_lambda_pa)
+            else:
+                zero = loss.detach().new_zeros((), dtype=torch.float32)
+                pa_stats = {
+                    "loss_total": zero,
+                    "loss_col": zero,
+                    "loss_row": zero,
+                    "num_terms": 0,
+                }
 
         if config.DEBUG_REPRO_STEPS > 0 and idx < config.DEBUG_REPRO_STEPS and dist.get_rank() == 0:
             sample_mean = float(samples.mean().item())

@@ -278,11 +278,25 @@ class MTLoRALinear(LoRALayer):
             return None
 
         matrix_fp32 = matrix.float()
-        if not bool(torch.isfinite(matrix_fp32).all()):
+        matrix_detached = matrix_fp32.detach()
+        if not bool(torch.isfinite(matrix_detached).all()):
             return None
 
-        if bool(torch.linalg.matrix_norm(matrix_fp32) < eps):
+        norm_floor = max(float(eps), 1e-6)
+        matrix_norm = torch.linalg.matrix_norm(matrix_detached)
+        if bool(matrix_norm < norm_floor):
             return None
+
+        min_dim = min(matrix_detached.shape)
+        if min_dim > 1:
+            # Skip QR when the detached matrix is still numerically rank deficient.
+            rank_tol = max(norm_floor, float(matrix_norm.item()) * 1e-5)
+            try:
+                matrix_rank = int(torch.linalg.matrix_rank(matrix_detached, tol=rank_tol).item())
+            except RuntimeError:
+                return None
+            if matrix_rank < min_dim:
+                return None
 
         q, _ = torch.linalg.qr(matrix_fp32, mode='reduced')
         if not bool(torch.isfinite(q).all()):
@@ -343,18 +357,23 @@ class MTLoRALinear(LoRALayer):
                 continue
 
             task_b = self.lora_tasks_B[task]
-            term_col = self._principal_angle_overlap_loss(
-                self.lora_shared_B,
-                task_b,
-                task_rank,
-                eps,
-            )
-            term_row = self._principal_angle_overlap_loss(
-                self.lora_shared_A.transpose(0, 1),
-                task_a.transpose(0, 1),
-                task_rank,
-                eps,
-            )
+            term_col = zero
+            term_row = zero
+
+            if mode in {"col", "both"}:
+                term_col = self._principal_angle_overlap_loss(
+                    self.lora_shared_B,
+                    task_b,
+                    task_rank,
+                    eps,
+                )
+            if mode in {"row", "both"}:
+                term_row = self._principal_angle_overlap_loss(
+                    self.lora_shared_A.transpose(0, 1),
+                    task_a.transpose(0, 1),
+                    task_rank,
+                    eps,
+                )
 
             if mode == "col":
                 term_total = term_col
