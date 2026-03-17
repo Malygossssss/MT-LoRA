@@ -2,7 +2,7 @@ DATA:
   IMG_SIZE: 448
 MODEL:
   TYPE: swin
-  NAME: mtlora_tiny_448_r64_scale4_pertask_with_pa_col
+  NAME: mtlora_tiny_448_r64_scale4_pertask_with_pa_col_LAMBDA_1e-1
   DROP_PATH_RATE: 0.2
   SWIN:
     EMBED_DIM: 96
@@ -27,7 +27,7 @@ MODEL:
     DOWNSAMPLER_ENABLED: False
     ENABLE_PRINCIPAL_ANGLE_REG: True
     PRINCIPAL_ANGLE_MODE: col
-    PRINCIPAL_ANGLE_LAMBDA: 1.0e-3
+    PRINCIPAL_ANGLE_LAMBDA: 1.0e-1
     PRINCIPAL_ANGLE_W_COL: 1.0
     PRINCIPAL_ANGLE_W_ROW: 1.0
     PRINCIPAL_ANGLE_START_EPOCH: 20
