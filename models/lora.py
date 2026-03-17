@@ -197,6 +197,10 @@ class MTLoRALinear(LoRALayer):
         self.tasks = tasks
         self.shared_mode = shared_mode
         self.principal_angle_candidate = False
+        self.ts_shared_complement_candidate = False
+        self.enable_ts_shared_complement = False
+        self.ts_shared_complement_grad_mode = "detach"
+        self.ts_shared_complement_eps = 1e-5
         self.r_shared = int(r.get('shared', 0))
         self.r_tasks = {task: int(r.get(task, 0)) for task in (tasks or [])}
         self.has_shared_lora = self.r_shared > 0
@@ -272,6 +276,59 @@ class MTLoRALinear(LoRALayer):
             and hasattr(self, "lora_tasks_A")
             and hasattr(self, "lora_tasks_B")
         )
+
+    def _supports_ts_shared_complement(self) -> bool:
+        return (
+            getattr(self, "enable_ts_shared_complement", False)
+            and getattr(self, "ts_shared_complement_candidate", False)
+            and self.has_shared_lora
+            and self.has_task_lora
+            and self.shared_mode in {"matrix", "matrixv2"}
+            and hasattr(self, "lora_shared_A")
+        )
+
+    def _shared_complement_basis(self, eps: float, grad_mode: str) -> Optional[torch.Tensor]:
+        shared_input_matrix = self.lora_shared_A.transpose(0, 1)
+        shared_input_fp32 = shared_input_matrix.float()
+        shared_input_detached = shared_input_fp32.detach()
+        if not bool(torch.isfinite(shared_input_detached).all()):
+            return None
+
+        norm_floor = max(float(eps), 1e-6)
+        matrix_norm = torch.linalg.matrix_norm(shared_input_detached)
+        if bool(matrix_norm <= norm_floor):
+            return None
+
+        rank_tol = max(norm_floor, float(matrix_norm.item()) * 1e-5)
+        try:
+            effective_rank = int(torch.linalg.matrix_rank(
+                shared_input_detached, tol=rank_tol).item())
+        except RuntimeError:
+            return None
+        if effective_rank <= 0:
+            return None
+
+        basis_source = shared_input_detached if grad_mode == "detach" else shared_input_fp32
+        q, _ = torch.linalg.qr(basis_source, mode='reduced')
+        q = q[:, :effective_rank]
+        if not bool(torch.isfinite(q.detach()).all()):
+            return None
+        return q
+
+    def _project_task_input_to_shared_complement(
+        self,
+        task_input: torch.Tensor,
+        shared_basis: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if shared_basis is None:
+            return task_input
+
+        task_input_fp32 = task_input.float()
+        projected_fp32 = task_input_fp32 - \
+            ((task_input_fp32 @ shared_basis) @ shared_basis.transpose(0, 1))
+        if not bool(torch.isfinite(projected_fp32.detach()).all()):
+            return task_input
+        return projected_fp32.to(dtype=task_input.dtype)
 
     def _orthogonal_basis(self, matrix: torch.Tensor, eps: float) -> Optional[torch.Tensor]:
         if matrix is None or matrix.numel() == 0:
@@ -399,11 +456,20 @@ class MTLoRALinear(LoRALayer):
         }
 
     def merge(self):
-        """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
+        """Merges the LoRA weights into the full-rank weights (W = W + delta_W).
+
+        Note: when TS shared-complement forward is enabled, v1 only guarantees
+        train/infer consistency along the dynamic forward path. Any future
+        merged/export path must preserve the effective TS mapping
+        B_t A_t (I - P_A) rather than the original B_t A_t.
+        """
         raise NotImplementedError
 
     def forward(self, x: torch.Tensor, x_tasks: Dict[str, torch.Tensor] = None):
         # TODO: handle merging
+        # V1 only guarantees train/infer parity for the dynamic forward path.
+        # Any future merged or export path must preserve the effective TS
+        # mapping B_t A_t (I - P_A) when shared-complement is enabled.
         pretrained = self.linear(x)
         if not self.has_lora:
             return pretrained, None
@@ -413,11 +479,27 @@ class MTLoRALinear(LoRALayer):
         lora_tasks = None
 
         if self.has_task_lora:
-            lora_tasks = {
-                task: pretrained + ((x if x_tasks is None else x_tasks[task]) @ self.lora_tasks_A[task].transpose(
-                    0, 1) @ self.lora_tasks_B[task].transpose(0, 1) * self.lora_task_scale[task])
-                for task in self.lora_tasks_A.keys()
-            }
+            complement_basis = None
+            if self._supports_ts_shared_complement():
+                grad_mode = str(
+                    getattr(self, "ts_shared_complement_grad_mode", "detach")).lower()
+                complement_basis = self._shared_complement_basis(
+                    eps=float(getattr(self, "ts_shared_complement_eps", 1e-5)),
+                    grad_mode=grad_mode,
+                )
+
+            lora_tasks = {}
+            for task in self.lora_tasks_A.keys():
+                task_input = x if x_tasks is None else x_tasks[task]
+                task_input = self._project_task_input_to_shared_complement(
+                    task_input,
+                    complement_basis,
+                )
+                lora_tasks[task] = pretrained + (
+                    task_input @ self.lora_tasks_A[task].transpose(0, 1)
+                    @ self.lora_tasks_B[task].transpose(0, 1)
+                    * self.lora_task_scale[task]
+                )
 
         if self.has_shared_lora:
             if self.shared_mode == 'matrix':

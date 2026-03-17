@@ -49,6 +49,18 @@ def _get_layer_rank(mtlora, layer_idx, with_task_lora=False):
         return mtlora.R_PER_TASK_LIST[layer_idx]
     return _get_shared_only_rank(mtlora, layer_idx)
 
+
+def _configure_stage_last_task_module(module, mtlora, stage_last=False):
+    module.principal_angle_candidate = bool(stage_last)
+    module.ts_shared_complement_candidate = bool(stage_last)
+    module.enable_ts_shared_complement = bool(
+        getattr(mtlora, "ENABLE_TS_SHARED_COMPLEMENT", False))
+    module.ts_shared_complement_grad_mode = str(
+        getattr(mtlora, "TS_SHARED_COMPLEMENT_GRAD_MODE", "detach")).lower()
+    module.ts_shared_complement_eps = float(
+        getattr(mtlora, "TS_SHARED_COMPLEMENT_EPS", 1e-5))
+
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., lora=False, tasks=None, mtlora=None, layer_idx=0):
         super().__init__()
@@ -73,7 +85,7 @@ class Mlp(nn.Module):
             )
         else:
             self.fc1 = CompatLinear(in_features, hidden_features)
-        self.fc1.principal_angle_candidate = bool(lora)
+        _configure_stage_last_task_module(self.fc1, mtlora, stage_last=lora)
         self.act = act_layer()
         if mtlora.FC2_ENABLED:
             self.fc2 = linear_cls(
@@ -90,7 +102,7 @@ class Mlp(nn.Module):
             )
         else:
             self.fc2 = CompatLinear(hidden_features, out_features)
-        self.fc2.principal_angle_candidate = bool(lora)
+        _configure_stage_last_task_module(self.fc2, mtlora, stage_last=lora)
         self.tasks = tasks
         self.drop = nn.Dropout(drop)
 
@@ -241,7 +253,7 @@ class WindowAttention(nn.Module):
             )
         else:
             self.proj = CompatLinear(dim, dim)
-        self.proj.principal_angle_candidate = bool(lora)
+        _configure_stage_last_task_module(self.proj, mtlora, stage_last=lora)
 
         self.tasks = tasks
         self.proj_drop = nn.Dropout(proj_drop)
