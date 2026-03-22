@@ -201,6 +201,7 @@ class MTLoRALinear(LoRALayer):
         self.enable_ts_shared_complement = False
         self.ts_shared_complement_grad_mode = "detach"
         self.ts_shared_complement_eps = 1e-5
+        self.ts_shared_complement_beta = 1.0
         self.r_shared = int(r.get('shared', 0))
         self.r_tasks = {task: int(r.get(task, 0)) for task in (tasks or [])}
         self.has_shared_lora = self.r_shared > 0
@@ -319,13 +320,17 @@ class MTLoRALinear(LoRALayer):
         self,
         task_input: torch.Tensor,
         shared_basis: Optional[torch.Tensor],
+        beta: float = 1.0,
     ) -> torch.Tensor:
         if shared_basis is None:
             return task_input
+        beta = float(beta)
+        if beta == 0.0:
+            return task_input
 
         task_input_fp32 = task_input.float()
-        projected_fp32 = task_input_fp32 - \
-            ((task_input_fp32 @ shared_basis) @ shared_basis.transpose(0, 1))
+        shared_projection_fp32 = (task_input_fp32 @ shared_basis) @ shared_basis.transpose(0, 1)
+        projected_fp32 = task_input_fp32 - (beta * shared_projection_fp32)
         if not bool(torch.isfinite(projected_fp32.detach()).all()):
             return task_input
         return projected_fp32.to(dtype=task_input.dtype)
@@ -469,7 +474,7 @@ class MTLoRALinear(LoRALayer):
         # TODO: handle merging
         # V1 only guarantees train/infer parity for the dynamic forward path.
         # Any future merged or export path must preserve the effective TS
-        # mapping B_t A_t (I - P_A) when shared-complement is enabled.
+        # mapping B_t A_t (I - beta * P_A) when shared-complement is enabled.
         pretrained = self.linear(x)
         if not self.has_lora:
             return pretrained, None
@@ -494,6 +499,7 @@ class MTLoRALinear(LoRALayer):
                 task_input = self._project_task_input_to_shared_complement(
                     task_input,
                     complement_basis,
+                    beta=float(getattr(self, "ts_shared_complement_beta", 1.0)),
                 )
                 lora_tasks[task] = pretrained + (
                     task_input @ self.lora_tasks_A[task].transpose(0, 1)

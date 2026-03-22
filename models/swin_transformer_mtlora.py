@@ -59,6 +59,8 @@ def _configure_stage_last_task_module(module, mtlora, stage_last=False):
         getattr(mtlora, "TS_SHARED_COMPLEMENT_GRAD_MODE", "detach")).lower()
     module.ts_shared_complement_eps = float(
         getattr(mtlora, "TS_SHARED_COMPLEMENT_EPS", 1e-5))
+    module.ts_shared_complement_beta = float(
+        getattr(mtlora, "TS_SHARED_COMPLEMENT_BETA", 1.0))
 
 
 class Mlp(nn.Module):
